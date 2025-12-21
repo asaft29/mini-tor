@@ -1,5 +1,5 @@
-use aes::Aes128;
 use aes::cipher::{KeyIvInit, StreamCipher};
+use aes::Aes128;
 use anyhow::anyhow;
 use ctr::Ctr128BE;
 use rand::Rng;
@@ -93,6 +93,12 @@ pub fn aes_encrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
 /// Decrypt data using AES-128 in CTR mode
 /// Returns decrypted data (same length as input)
 /// Note: CTR mode encryption and decryption are the same operation
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The ciphertext is too short (< 16 bytes)
+/// - The IV cannot be extracted from the data
 pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
     // 1. Validate length (must have at least the IV)
     if data.len() < 16 {
@@ -103,8 +109,12 @@ pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
     }
 
     // 2. Extract the IV (first 16 bytes)
-    let iv_slice = &data[0..16];
-    let ciphertext = &data[16..];
+    let iv_slice = data
+        .get(0..16)
+        .ok_or_else(|| anyhow!("Invalid ciphertext: missing IV (expected 16 bytes)"))?;
+    let ciphertext = data
+        .get(16..)
+        .ok_or_else(|| anyhow!("Invalid ciphertext: missing encrypted data"))?;
 
     // 3. Initialize cipher with the Key and EXTRACTED IV
     let mut cipher = Aes128Ctr::new(key.into(), iv_slice.into());

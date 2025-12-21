@@ -138,14 +138,13 @@ impl NodeRegistry {
                 self.nodes.insert(node_id.clone(), entry);
                 tracing::info!("Registered new node: {}", node_id);
             }
-            true => match self.nodes.get_mut(&node_id) {
-                Some(entry) => {
+            true => {
+                if let Some(entry) = self.nodes.get_mut(&node_id) {
                     entry.descriptor = Arc::new(descriptor);
                     entry.last_heartbeat = now;
                     tracing::info!("Updated node: {}", node_id);
                 }
-                _ => {}
-            },
+            }
         }
     }
 

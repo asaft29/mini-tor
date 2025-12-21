@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 
 /// State of a circuit
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CircuitState {
     /// Circuit is being established (DH handshake in progress)
     Initializing,
@@ -47,6 +48,7 @@ impl CircuitHandler {
     }
 
     /// Get the circuit ID
+    #[allow(dead_code)]
     pub fn circuit_id(&self) -> CircuitId {
         match self {
             CircuitHandler::Entry(handler) => handler.circuit_id(),
@@ -56,6 +58,7 @@ impl CircuitHandler {
     }
 
     /// Get the current state
+    #[allow(dead_code)]
     pub fn state(&self) -> CircuitState {
         match self {
             CircuitHandler::Entry(handler) => handler.state(),
@@ -65,6 +68,7 @@ impl CircuitHandler {
     }
 
     /// Get the session key (if established)
+    #[allow(dead_code)]
     pub fn session_key(&self) -> Option<&SessionKey> {
         match self {
             CircuitHandler::Entry(handler) => handler.session_key(),
@@ -74,6 +78,7 @@ impl CircuitHandler {
     }
 
     /// Close this circuit
+    #[allow(dead_code)]
     pub fn close(&mut self) {
         match self {
             CircuitHandler::Entry(handler) => handler.close(),
@@ -88,10 +93,7 @@ impl CircuitHandler {
         match self {
             CircuitHandler::Entry(handler) => handler.handle_backward_relay(msg).await,
             CircuitHandler::Middle(handler) => handler.handle_backward_relay(msg).await,
-            CircuitHandler::Exit(_) => {
-                // Exit nodes don't handle backward relay - they originate backward messages
-                Ok(Some(msg))
-            }
+            CircuitHandler::Exit(_) => Ok(Some(msg)),
         }
     }
 
@@ -108,7 +110,7 @@ impl CircuitHandler {
             CircuitHandler::Middle(handler) => {
                 handler.spawn_nexthop_reader(circuit_registry, client_stream)
             }
-            CircuitHandler::Exit(_) => None, // Exit nodes don't have next hops to read from
+            CircuitHandler::Exit(_) => None,
         }
     }
 }
@@ -117,6 +119,7 @@ impl CircuitHandler {
 /// Unlike the client's CircuitManager, this only tracks local circuit state
 pub struct CircuitRegistry {
     circuits: HashMap<CircuitId, CircuitHandler>,
+    #[allow(dead_code)]
     next_circuit_id: CircuitId,
 }
 
@@ -130,6 +133,7 @@ impl CircuitRegistry {
     }
 
     /// Allocate a new circuit ID
+    #[allow(dead_code)]
     pub fn allocate_circuit_id(&mut self) -> CircuitId {
         let id = self.next_circuit_id;
         self.next_circuit_id = self.next_circuit_id.wrapping_add(1);
@@ -147,11 +151,13 @@ impl CircuitRegistry {
     }
 
     /// Remove a circuit
+    #[allow(dead_code)]
     pub fn remove_circuit(&mut self, circuit_id: CircuitId) -> Option<CircuitHandler> {
         self.circuits.remove(&circuit_id)
     }
 
     /// Get number of active circuits
+    #[allow(dead_code)]
     pub fn circuit_count(&self) -> usize {
         self.circuits.len()
     }
@@ -164,17 +170,12 @@ impl CircuitRegistry {
     ) -> anyhow::Result<Option<Message>> {
         let circuit_id = msg.circuit_id;
 
-        // Check if circuit exists
         if let Some(handler) = self.get_circuit_mut(circuit_id) {
             handler.handle_message(msg, prev_hop_stream).await
+        } else if msg.command == MessageCommand::Create {
+            Ok(None)
         } else {
-            // Circuit doesn't exist - might be a CREATE message
-            if msg.command == MessageCommand::Create {
-                // CREATE message should be handled by creating a new circuit
-                Ok(None) // Will be handled by the specific node type
-            } else {
-                Err(anyhow::anyhow!("Circuit {} not found", circuit_id))
-            }
+            Err(anyhow::anyhow!("Circuit {} not found", circuit_id))
         }
     }
 
@@ -185,7 +186,6 @@ impl CircuitRegistry {
     ) -> anyhow::Result<Option<Message>> {
         let circuit_id = msg.circuit_id;
 
-        // Get the circuit handler
         if let Some(handler) = self.get_circuit_mut(circuit_id) {
             handler.handle_backward_relay(msg).await
         } else {
@@ -238,7 +238,7 @@ impl CircuitContext {
 /// Split into read and write halves for bidirectional communication
 pub struct NextHop {
     pub write: WriteHalf<TcpStream>,
-    pub read: Option<ReadHalf<TcpStream>>, // Option so we can take ownership for background task
+    pub read: Option<ReadHalf<TcpStream>>,
 }
 
 impl NextHop {
