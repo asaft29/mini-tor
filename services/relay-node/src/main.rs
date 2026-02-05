@@ -122,7 +122,10 @@ async fn register_with_directory(
         Ok(())
     } else {
         let status = response.status();
-        let body = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
         Err(anyhow::anyhow!(
             "Failed to register with directory: {} - {}",
             status,
@@ -146,7 +149,10 @@ async fn unregister_from_directory(
         Ok(())
     } else {
         let status = response.status();
-        let body = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
         Err(anyhow::anyhow!(
             "Failed to unregister from directory: {} - {}",
             status,

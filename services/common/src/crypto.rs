@@ -1,5 +1,5 @@
-use aes::cipher::{KeyIvInit, StreamCipher};
 use aes::Aes128;
+use aes::cipher::{KeyIvInit, StreamCipher};
 use anyhow::anyhow;
 use ctr::Ctr128BE;
 use rand::Rng;
