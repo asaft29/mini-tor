@@ -196,8 +196,25 @@ impl EntryCircuitHandler {
     pub async fn handle_message(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         match msg.command {
             MessageCommand::Create => self.handle_create(msg).await,
-            MessageCommand::Extend => self.handle_extend(msg).await,
-            MessageCommand::Data => self.handle_relay(msg).await,
+            MessageCommand::Extend => {
+                if self.next_hop.is_some() {
+                    // Already extended once; relay this EXTEND to the next hop
+                    // (e.g., middle node will handle extending to exit)
+                    debug!(
+                        "Entry: Relaying EXTEND to next hop for circuit {}",
+                        self.context.circuit_id
+                    );
+                    self.handle_relay(msg).await
+                } else {
+                    // First EXTEND: handle locally (connect to middle node)
+                    self.handle_extend(msg).await
+                }
+            }
+            // Forward all stream-level and relay messages to next hop
+            MessageCommand::Data
+            | MessageCommand::Begin
+            | MessageCommand::End
+            | MessageCommand::Connected => self.handle_relay(msg).await,
             MessageCommand::Destroy => {
                 info!("Entry: Circuit {} destroyed", self.context.circuit_id);
                 self.close();

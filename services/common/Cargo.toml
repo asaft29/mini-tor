@@ -17,3 +17,5 @@ ctr = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["io-util"] }
 rand = "0.9.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+tor-llcrypto = "0.23"

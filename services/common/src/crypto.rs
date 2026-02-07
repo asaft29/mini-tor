@@ -3,8 +3,13 @@ use aes::cipher::{KeyIvInit, StreamCipher};
 use anyhow::anyhow;
 use ctr::Ctr128BE;
 use rand::Rng;
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tor_llcrypto::pk::curve25519::{EphemeralSecret, PublicKey as X25519PublicKey};
+
+use crate::PublicKey;
+
 type Aes128Ctr = Ctr128BE<Aes128>;
 
 /// Session key for encrypted communication between nodes
@@ -141,6 +146,46 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut output = [0u8; 32];
     output.copy_from_slice(&result);
     output
+}
+
+/// Ephemeral key pair for client-side Diffie-Hellman key exchange
+/// Uses X25519 via tor-llcrypto. Should be used once and discarded.
+/// The client generates one ephemeral key pair per circuit hop.
+pub struct EphemeralKeyPair {
+    /// The public key (safe to share with relay nodes)
+    pub public: PublicKey,
+    secret: EphemeralSecret,
+}
+
+impl EphemeralKeyPair {
+    /// Generate a new ephemeral keypair (should be used once and discarded)
+    pub fn generate() -> Self {
+        let secret = EphemeralSecret::random_from_rng(OsRng);
+        let public_x25519 = X25519PublicKey::from(&secret);
+
+        let public = PublicKey {
+            bytes: *public_x25519.as_bytes(),
+        };
+
+        Self { public, secret }
+    }
+
+    /// Perform DH exchange with a relay's public key
+    /// Consumes self since ephemeral keys should only be used once
+    /// Returns the shared secret (SHA-256 hashed) that can be used to derive session keys
+    pub fn diffie_hellman(self, their_public: &[u8; 32]) -> [u8; 32] {
+        let their_public_key = X25519PublicKey::from(*their_public);
+        let shared_secret = self.secret.diffie_hellman(&their_public_key);
+
+        let mut hasher = Sha256::new();
+        hasher.update(shared_secret.as_bytes());
+        let result = hasher.finalize();
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&result);
+
+        key
+    }
 }
 
 #[cfg(test)]

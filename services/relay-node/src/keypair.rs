@@ -1,7 +1,7 @@
 use common::PublicKey;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
-use tor_llcrypto::pk::curve25519::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
+use tor_llcrypto::pk::curve25519::{PublicKey as X25519PublicKey, StaticSecret};
 
 /// A cryptographic key pair for a relay node using Tor's official curve25519 implementation
 /// Uses tor-llcrypto from the Tor Project's arti implementation
@@ -69,48 +69,10 @@ impl KeyPair {
     }
 }
 
-/// This struct is currently only used in tests, but will be used by the Tor client
-/// Relay nodes use the persistent `KeyPair` struct instead.
-#[allow(dead_code)]
-pub struct EphemeralKeyPair {
-    pub public: PublicKey,
-    secret: EphemeralSecret,
-}
-
-impl EphemeralKeyPair {
-    /// Generate a new ephemeral keypair (should be used once and discarded)
-    #[allow(dead_code)]
-    pub fn generate() -> Self {
-        let secret = EphemeralSecret::random_from_rng(OsRng);
-        let public_x25519 = X25519PublicKey::from(&secret);
-
-        let public = PublicKey {
-            bytes: *public_x25519.as_bytes(),
-        };
-
-        Self { public, secret }
-    }
-
-    /// Perform DH exchange with a relay's static public key
-    #[allow(dead_code)]
-    pub fn diffie_hellman(self, their_public: &[u8; 32]) -> [u8; 32] {
-        let their_public_key = X25519PublicKey::from(*their_public);
-        let shared_secret = self.secret.diffie_hellman(&their_public_key);
-
-        let mut hasher = Sha256::new();
-        hasher.update(shared_secret.as_bytes());
-        let result = hasher.finalize();
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&result);
-
-        key
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::EphemeralKeyPair;
 
     #[test]
     fn test_diffie_hellman_exchange() {

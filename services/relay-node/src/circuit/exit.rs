@@ -128,18 +128,26 @@ impl ExitCircuitHandler {
                     },
                 );
 
-                Ok(Some(Message::connected(
+                // Encrypt CONNECTED response with backward key
+                let connected_msg = Message::connected(self.context.circuit_id, msg.stream_id);
+                let encrypted_data = aes_encrypt(&connected_msg.data, &session_key.backward);
+                Ok(Some(Message::new(
                     self.context.circuit_id,
                     msg.stream_id,
+                    MessageCommand::Connected,
+                    encrypted_data,
                 )))
             }
             Err(e) => {
                 error!("Exit: Failed to connect to {}: {}", dest_str, e);
 
+                // Encrypt END response with backward key
+                let end_data = format!("Connection failed: {}", e).into_bytes();
+                let encrypted_data = aes_encrypt(&end_data, &session_key.backward);
                 Ok(Some(Message::end(
                     self.context.circuit_id,
                     msg.stream_id,
-                    format!("Connection failed: {}", e).into_bytes(),
+                    encrypted_data,
                 )))
             }
         }
@@ -168,7 +176,8 @@ impl ExitCircuitHandler {
                             Ok(0) => {
                                 info!("Exit: Destination closed for circuit {} stream {}", circuit_id, stream_id);
 
-                                let end_msg = Message::end(circuit_id, stream_id, vec![]);
+                                let encrypted_data = aes_encrypt(&[], &backward_key);
+                                let end_msg = Message::end(circuit_id, stream_id, encrypted_data);
 
                                 let bytes = end_msg.to_bytes();
                                 let mut stream = prev_hop_stream.lock().await;
@@ -199,10 +208,12 @@ impl ExitCircuitHandler {
                             Err(e) => {
                                 error!("Exit: Error reading from destination for circuit {} stream {}: {}", circuit_id, stream_id, e);
 
+                                let end_data = format!("Read error: {}", e).into_bytes();
+                                let encrypted_data = aes_encrypt(&end_data, &backward_key);
                                 let end_msg = Message::end(
                                     circuit_id,
                                     stream_id,
-                                    format!("Read error: {}", e).into_bytes(),
+                                    encrypted_data,
                                 );
 
                                 let bytes = end_msg.to_bytes();
@@ -258,10 +269,11 @@ impl ExitCircuitHandler {
                     self.context.circuit_id, msg.stream_id
                 );
 
+                let encrypted_data = aes_encrypt(b"Destination closed", &session_key.backward);
                 return Ok(Some(Message::end(
                     self.context.circuit_id,
                     msg.stream_id,
-                    b"Destination closed".to_vec(),
+                    encrypted_data,
                 )));
             }
             debug!(
@@ -277,10 +289,11 @@ impl ExitCircuitHandler {
                 msg.stream_id, self.context.circuit_id
             );
 
+            let encrypted_data = aes_encrypt(b"Stream not found", &session_key.backward);
             Ok(Some(Message::end(
                 self.context.circuit_id,
                 msg.stream_id,
-                b"Stream not found".to_vec(),
+                encrypted_data,
             )))
         }
     }
@@ -301,10 +314,17 @@ impl ExitCircuitHandler {
             );
         }
 
+        let session_key = self
+            .context
+            .session_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
+
+        let encrypted_data = aes_encrypt(&[], &session_key.backward);
         Ok(Some(Message::end(
             self.context.circuit_id,
             msg.stream_id,
-            vec![],
+            encrypted_data,
         )))
     }
 

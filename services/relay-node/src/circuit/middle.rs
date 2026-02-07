@@ -96,10 +96,7 @@ impl MiddleCircuitHandler {
         let mut stream = TcpStream::connect(addr).await?;
         debug!("Middle: Connected to next hop at {}", addr);
 
-        let create_msg = Message::create(
-            self.context.circuit_id,
-            self.keypair.public_key().bytes.to_vec(),
-        );
+        let create_msg = Message::create(self.context.circuit_id, client_public.to_vec());
 
         let create_bytes = create_msg.to_bytes();
         stream.write_all(&create_bytes).await?;
@@ -120,19 +117,8 @@ impl MiddleCircuitHandler {
             return Err(anyhow::anyhow!("CREATED response too short"));
         }
 
-        let mut next_public = [0u8; 32];
-        next_public.copy_from_slice(
-            created_msg
-                .data
-                .get(0..32)
-                .ok_or(anyhow::anyhow!("CREATED response too short"))?,
-        );
-
-        let shared_secret = self.keypair.diffie_hellman(&next_public);
-        let _session_key = derive_session_key(&shared_secret);
-
         info!(
-            "Middle: Established session with next hop for circuit {}",
+            "Middle: Forwarding exit node's public key back for circuit {}",
             self.context.circuit_id
         );
 
@@ -140,7 +126,7 @@ impl MiddleCircuitHandler {
 
         Ok(Some(Message::extended(
             self.context.circuit_id,
-            next_public.to_vec(),
+            created_msg.data,
         )))
     }
 
@@ -195,7 +181,7 @@ impl MiddleCircuitHandler {
         let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
 
         if let Some(next_hop) = &mut self.next_hop {
-            let relay_msg = Message::data(msg.circuit_id, msg.stream_id, decrypted);
+            let relay_msg = Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted);
 
             let bytes = relay_msg.to_bytes();
             next_hop.write.write_all(&bytes).await?;
@@ -241,7 +227,10 @@ impl MiddleCircuitHandler {
             MessageCommand::Create => self.handle_create(msg).await,
             MessageCommand::Extend => self.handle_extend(msg).await,
             MessageCommand::Extended => self.handle_extended(msg).await,
-            MessageCommand::Data => self.handle_relay(msg).await,
+            MessageCommand::Data
+            | MessageCommand::Begin
+            | MessageCommand::End
+            | MessageCommand::Connected => self.handle_relay(msg).await,
             MessageCommand::Destroy => {
                 info!("Middle: Circuit {} destroyed", self.context.circuit_id);
                 self.close();
