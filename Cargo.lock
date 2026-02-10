@@ -2619,7 +2619,6 @@ dependencies = [
  "common",
  "reqwest 0.13.2",
  "serde",
- "serde_json",
  "simple_socks5",
  "tokio",
  "tracing",

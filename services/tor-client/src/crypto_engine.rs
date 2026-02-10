@@ -1,5 +1,5 @@
 use anyhow::Result;
-use common::crypto::{aes_decrypt, aes_encrypt, SessionKey};
+use common::crypto::{SessionKey, aes_decrypt, aes_encrypt};
 
 /// Keys for a 3-hop onion circuit
 ///
@@ -60,6 +60,7 @@ impl OnionKeys {
     /// Encrypt data for the EXTEND payload to the middle node
     ///
     /// Only one layer needed: entry.forward (entry peels it to see the EXTEND payload)
+    #[allow(dead_code)]
     pub fn encrypt_for_extend_to_middle(&self, plaintext: &[u8]) -> Vec<u8> {
         aes_encrypt(plaintext, &self.entry.forward)
     }
@@ -68,6 +69,7 @@ impl OnionKeys {
     ///
     /// Two layers needed: middle.forward, then entry.forward
     /// Entry peels one layer, forwards to middle. Middle sees the EXTEND payload.
+    #[allow(dead_code)]
     pub fn encrypt_for_extend_to_exit(&self, plaintext: &[u8]) -> Vec<u8> {
         let layer2 = aes_encrypt(plaintext, &self.middle.forward);
         aes_encrypt(&layer2, &self.entry.forward)
@@ -79,6 +81,7 @@ impl OnionKeys {
     ///
     /// # Errors
     /// Returns an error if decryption fails
+    #[allow(dead_code)]
     pub fn decrypt_extended_from_middle(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         aes_decrypt(ciphertext, &self.entry.backward)
     }
@@ -89,6 +92,7 @@ impl OnionKeys {
     ///
     /// # Errors
     /// Returns an error if decryption fails
+    #[allow(dead_code)]
     pub fn decrypt_extended_from_exit(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         aes_decrypt(ciphertext, &self.entry.backward)
     }
@@ -109,7 +113,15 @@ mod tests {
 
     #[test]
     fn test_onion_encrypt_decrypt_roundtrip() {
-        let keys = test_keys();
+        // For roundtrip to work, we need keys where the backward decryption
+        // undoes the forward encryption. In real Tor, the relays apply
+        // backward encryption on responses, but this test simulates the full
+        // loop by using symmetric keys (forward == backward).
+        let keys = OnionKeys::new(
+            SessionKey::new([1u8; 16], [1u8; 16]),
+            SessionKey::new([2u8; 16], [2u8; 16]),
+            SessionKey::new([3u8; 16], [3u8; 16]),
+        );
         let plaintext = b"Hello, onion routing!";
 
         let encrypted = keys.onion_encrypt(plaintext);

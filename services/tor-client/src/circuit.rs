@@ -1,7 +1,7 @@
 use crate::crypto_engine::OnionKeys;
 use crate::directory_client::DirectoryClient;
 use anyhow::{Context, Result};
-use common::crypto::{aes_decrypt, aes_encrypt, derive_session_key, EphemeralKeyPair, SessionKey};
+use common::crypto::{EphemeralKeyPair, SessionKey, aes_decrypt, aes_encrypt, derive_session_key};
 use common::{CircuitId, Message, MessageCommand, NodeDescriptor, StreamId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use tracing::{debug, error, info, warn};
 
 /// State of a circuit
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CircuitState {
     /// Circuit is being built (handshakes in progress)
     Building,
@@ -60,11 +61,7 @@ impl Circuit {
     }
 
     /// Register a stream sender for receiving demuxed backward messages
-    pub fn register_stream(
-        &mut self,
-        stream_id: StreamId,
-        sender: mpsc::UnboundedSender<Message>,
-    ) {
+    pub fn register_stream(&mut self, stream_id: StreamId, sender: mpsc::UnboundedSender<Message>) {
         self.stream_senders.insert(stream_id, sender);
     }
 
@@ -109,6 +106,7 @@ impl Circuit {
     ///
     /// # Errors
     /// Returns an error if writing to the entry node fails
+    #[allow(dead_code)]
     pub async fn send_raw(&self, msg: &Message) -> Result<()> {
         let bytes = msg.to_bytes();
         let mut stream = self.entry_stream.lock().await;
@@ -172,13 +170,9 @@ impl CircuitBuilder {
         info!("Completed CREATE handshake with entry node");
 
         // Step 3: EXTEND to middle node
-        let middle_key = Self::handshake_extend_to_middle(
-            circuit_id,
-            &mut entry_stream,
-            middle,
-            &entry_key,
-        )
-        .await?;
+        let middle_key =
+            Self::handshake_extend_to_middle(circuit_id, &mut entry_stream, middle, &entry_key)
+                .await?;
         info!("Completed EXTEND to middle node");
 
         // Step 4: EXTEND to exit node
@@ -445,10 +439,20 @@ impl CircuitPool {
         for i in 0..self.pool_size {
             match self.build_circuit().await {
                 Ok(circuit_id) => {
-                    info!("Built circuit {}/{}: id={}", i + 1, self.pool_size, circuit_id);
+                    info!(
+                        "Built circuit {}/{}: id={}",
+                        i + 1,
+                        self.pool_size,
+                        circuit_id
+                    );
                 }
                 Err(e) => {
-                    error!("Failed to build circuit {}/{}: {}", i + 1, self.pool_size, e);
+                    error!(
+                        "Failed to build circuit {}/{}: {}",
+                        i + 1,
+                        self.pool_size,
+                        e
+                    );
                     return Err(e).context("Failed to initialize circuit pool");
                 }
             }
@@ -506,6 +510,7 @@ impl CircuitPool {
     ///
     /// # Errors
     /// Returns an error if building a replacement circuit fails
+    #[allow(dead_code)]
     pub async fn replace_circuit(&mut self, failed_id: CircuitId) -> Result<CircuitId> {
         info!("Replacing failed circuit {}", failed_id);
         self.circuits.remove(&failed_id);
@@ -534,6 +539,11 @@ impl CircuitPool {
         let id = self.next_circuit_id;
         self.next_circuit_id = self.next_circuit_id.wrapping_add(1);
         id
+    }
+
+    /// Get references to all circuits in the pool (for spawning readers)
+    pub fn circuits(&self) -> Vec<Arc<Mutex<Circuit>>> {
+        self.circuits.values().map(Arc::clone).collect()
     }
 
     /// Get the number of circuits in the pool
@@ -598,7 +608,8 @@ pub fn spawn_circuit_reader(circuit: Arc<Mutex<Circuit>>) -> tokio::task::JoinHa
             };
 
             // Create decrypted message and route to the correct stream
-            let decrypted_msg = Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted_data);
+            let decrypted_msg =
+                Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted_data);
 
             if let Some(sender) = circuit_guard.stream_senders.get(&msg.stream_id) {
                 if sender.send(decrypted_msg).is_err() {
@@ -656,11 +667,7 @@ mod tests {
 
     #[test]
     fn test_stream_id_allocation() {
-        let keys = OnionKeys::new(
-            SessionKey::zero(),
-            SessionKey::zero(),
-            SessionKey::zero(),
-        );
+        let keys = OnionKeys::new(SessionKey::zero(), SessionKey::zero(), SessionKey::zero());
         let stream = Arc::new(Mutex::new(unsafe {
             // We can't create a real TcpStream in a sync test, so just test the allocation logic
             // by testing the ID counter directly

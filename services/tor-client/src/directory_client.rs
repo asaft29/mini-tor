@@ -9,8 +9,11 @@ use tracing::{debug, info};
 pub struct DirectoryClient {
     http_client: Client,
     directory_url: String,
+    #[allow(dead_code)]
     cached_nodes: Vec<NodeDescriptor>,
+    #[allow(dead_code)]
     cache_expiry: Option<Instant>,
+    #[allow(dead_code)]
     cache_ttl: Duration,
 }
 
@@ -84,13 +87,17 @@ impl DirectoryClient {
     ///
     /// # Errors
     /// Returns an error if the HTTP request fails or the response is invalid
+    #[allow(dead_code)]
     pub async fn get_all_nodes(&mut self) -> Result<Vec<NodeDescriptor>> {
         // Check cache
-        if let Some(expiry) = self.cache_expiry {
-            if Instant::now() < expiry {
-                debug!("Returning cached node list ({} nodes)", self.cached_nodes.len());
-                return Ok(self.cached_nodes.clone());
-            }
+        if let Some(expiry) = self.cache_expiry
+            && Instant::now() < expiry
+        {
+            debug!(
+                "Returning cached node list ({} nodes)",
+                self.cached_nodes.len()
+            );
+            return Ok(self.cached_nodes.clone());
         }
 
         let url = format!("{}/api/nodes", self.directory_url);
@@ -118,6 +125,7 @@ impl DirectoryClient {
     }
 
     /// Check if the cache is still valid
+    #[allow(dead_code)]
     pub fn is_cache_valid(&self) -> bool {
         self.cache_expiry
             .map(|expiry| Instant::now() < expiry)
@@ -127,6 +135,7 @@ impl DirectoryClient {
 
 /// Response wrapper for the `/api/nodes` endpoint
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct NodesResponse {
     nodes: Vec<NodeDescriptor>,
     #[allow(dead_code)]
