@@ -88,13 +88,15 @@ impl OnionKeys {
 
     /// Decrypt an EXTENDED response from the exit node
     ///
-    /// One layer: entry.backward (only entry adds its backward layer for EXTENDED)
+    /// Two layers: entry.backward first, then middle.backward
+    /// (entry adds its backward layer, middle adds its backward layer)
     ///
     /// # Errors
     /// Returns an error if decryption fails
     #[allow(dead_code)]
     pub fn decrypt_extended_from_exit(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        aes_decrypt(ciphertext, &self.entry.backward)
+        let after_entry = aes_decrypt(ciphertext, &self.entry.backward)?;
+        aes_decrypt(&after_entry, &self.middle.backward)
     }
 }
 

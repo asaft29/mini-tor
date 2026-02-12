@@ -57,33 +57,45 @@ impl MiddleCircuitHandler {
     }
 
     /// Handle EXTEND message (from entry node asking us to extend to exit node)
+    ///
+    /// The EXTEND payload arrives encrypted with our session key (forward direction).
+    /// We decrypt it to get the address and public key, then connect to the next hop.
+    /// The EXTENDED response is encrypted with our backward key before returning.
     async fn handle_extend(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         info!(
             "Middle: Received EXTEND for circuit {}",
             self.context.circuit_id
         );
 
-        let null_pos = msg
-            .data
+        // Decrypt the EXTEND payload with our session key
+        let session_key = self
+            .context
+            .session_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No session key established for EXTEND"))?;
+
+        let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
+
+        let null_pos = decrypted
             .iter()
             .position(|&b| b == 0)
             .ok_or_else(|| anyhow::anyhow!("No null terminator in EXTEND address"))?;
 
         let addr_str = std::str::from_utf8(
-            msg.data
+            decrypted
                 .get(0..null_pos)
                 .ok_or(anyhow::anyhow!("Invalid EXTEND data"))?,
         )?;
         let addr: std::net::SocketAddr = addr_str.parse()?;
 
         let key_start = null_pos + 1;
-        if msg.data.len() < key_start + 32 {
+        if decrypted.len() < key_start + 32 {
             return Err(anyhow::anyhow!("EXTEND message missing public key"));
         }
 
         let mut client_public = [0u8; 32];
         client_public.copy_from_slice(
-            msg.data
+            decrypted
                 .get(key_start..key_start + 32)
                 .ok_or(anyhow::anyhow!("EXTEND message missing public key"))?,
         );
@@ -124,9 +136,12 @@ impl MiddleCircuitHandler {
 
         self.next_hop = Some(NextHop::new(stream));
 
+        // Encrypt the EXTENDED response with our backward key
+        let encrypted_response = aes_encrypt(&created_msg.data, &session_key.backward);
+
         Ok(Some(Message::extended(
             self.context.circuit_id,
-            created_msg.data,
+            encrypted_response,
         )))
     }
 

@@ -6,6 +6,7 @@ use simple_socks5::parse::AddrPort;
 use simple_socks5::{ATYP, Socks5};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
@@ -14,12 +15,15 @@ use tracing::{debug, error, info, warn};
 /// Buffer size for reading data from the SOCKS5 client
 const SOCKS5_READ_BUF_SIZE: usize = 4096;
 
+/// Timeout for waiting for CONNECTED response from exit node
+const CONNECTED_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Handle a single SOCKS5 stream over an onion circuit
 ///
 /// Bridges a SOCKS5 client connection to a destination through the onion circuit:
 /// 1. Allocates a stream ID and registers a backward channel with the circuit
 /// 2. Sends a BEGIN message (onion-encrypted) to open the stream on the exit node
-/// 3. Waits for a CONNECTED response from the exit node
+/// 3. Waits for a CONNECTED response from the exit node (with timeout)
 /// 4. Sends a SOCKS5 success reply to the client
 /// 5. Relays data bidirectionally (SOCKS5 client <-> circuit) until the stream closes
 /// 6. Cleans up by sending END and unregistering the stream
@@ -56,15 +60,24 @@ pub async fn handle_stream(
     }
     debug!("Sent BEGIN for stream {} to {}", stream_id, destination);
 
-    // 3. Wait for CONNECTED response from exit node
-    let connected_msg = match rx.recv().await {
-        Some(msg) => msg,
-        None => {
+    // 3. Wait for CONNECTED response from exit node (with timeout)
+    let connected_msg = match tokio::time::timeout(CONNECTED_TIMEOUT, rx.recv()).await {
+        Ok(Some(msg)) => msg,
+        Ok(None) => {
             // Channel closed before we got a response -- circuit died
             cleanup_stream(&circuit, socks_stream, stream_id).await;
             return Err(anyhow::anyhow!(
                 "Circuit closed before CONNECTED received for stream {}",
                 stream_id
+            ));
+        }
+        Err(_) => {
+            // Timed out waiting for CONNECTED
+            cleanup_stream(&circuit, socks_stream, stream_id).await;
+            return Err(anyhow::anyhow!(
+                "Timed out waiting for CONNECTED on stream {} ({}s)",
+                stream_id,
+                CONNECTED_TIMEOUT.as_secs()
             ));
         }
     };
@@ -191,4 +204,29 @@ async fn cleanup_stream(
 
     // Shut down the SOCKS5 side
     let _ = socks_stream.shutdown().await;
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::assertions_on_constants
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connected_timeout_is_reasonable() {
+        // Ensure the timeout is set to a reasonable value
+        assert!(CONNECTED_TIMEOUT.as_secs() >= 10);
+        assert!(CONNECTED_TIMEOUT.as_secs() <= 120);
+    }
+
+    #[test]
+    fn test_socks5_buffer_size() {
+        // Buffer should be at least 1KB for reasonable throughput
+        assert!(SOCKS5_READ_BUF_SIZE >= 1024);
+        // Buffer should not be excessively large
+        assert!(SOCKS5_READ_BUF_SIZE <= 65536);
+    }
 }

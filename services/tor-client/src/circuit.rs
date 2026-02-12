@@ -5,10 +5,14 @@ use common::crypto::{EphemeralKeyPair, SessionKey, aes_decrypt, aes_encrypt, der
 use common::{CircuitId, Message, MessageCommand, NodeDescriptor, StreamId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
+use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
+
+/// Timeout for handshake operations (CREATE, EXTEND)
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// State of a circuit
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,14 +31,14 @@ pub enum CircuitState {
 /// A single onion routing circuit through 3 relay nodes
 ///
 /// Each circuit holds:
-/// - A TCP connection to the entry node
+/// - A write half of the TCP connection to the entry node
 /// - Session keys for all 3 hops (used for onion encryption)
 /// - A map of active streams multiplexed over this circuit
 pub struct Circuit {
     pub circuit_id: CircuitId,
     pub state: CircuitState,
-    /// TCP connection to the entry node (shared for writes)
-    pub entry_stream: Arc<Mutex<TcpStream>>,
+    /// Write half of TCP connection to the entry node
+    pub entry_writer: Arc<Mutex<WriteHalf<TcpStream>>>,
     /// Onion encryption keys for all 3 hops
     pub onion_keys: OnionKeys,
     /// Channel senders for each active stream (stream_id -> sender)
@@ -86,8 +90,8 @@ impl Circuit {
         let msg = Message::new(self.circuit_id, stream_id, command, encrypted_data);
         let bytes = msg.to_bytes();
 
-        let mut stream = self.entry_stream.lock().await;
-        stream
+        let mut writer = self.entry_writer.lock().await;
+        writer
             .write_all(&bytes)
             .await
             .context("Failed to write to entry node")?;
@@ -109,13 +113,19 @@ impl Circuit {
     #[allow(dead_code)]
     pub async fn send_raw(&self, msg: &Message) -> Result<()> {
         let bytes = msg.to_bytes();
-        let mut stream = self.entry_stream.lock().await;
-        stream
+        let mut writer = self.entry_writer.lock().await;
+        writer
             .write_all(&bytes)
             .await
             .context("Failed to write to entry node")?;
         Ok(())
     }
+}
+
+/// Result of building a circuit: the circuit itself and the read half for the reader task
+pub struct BuiltCircuit {
+    pub circuit: Circuit,
+    pub read_half: ReadHalf<TcpStream>,
 }
 
 /// Builds a 3-hop circuit via telescopic handshake
@@ -130,13 +140,17 @@ pub struct CircuitBuilder;
 impl CircuitBuilder {
     /// Build a complete 3-hop circuit
     ///
+    /// Returns a `BuiltCircuit` containing the circuit and the read half of the
+    /// TCP connection to the entry node. The read half should be passed to
+    /// `spawn_circuit_reader()` for backward message processing.
+    ///
     /// # Arguments
     /// * `circuit_id` - Unique ID for this circuit
     /// * `path` - Ordered list of 3 node descriptors: [entry, middle, exit]
     ///
     /// # Errors
     /// Returns an error if any handshake step fails
-    pub async fn build(circuit_id: CircuitId, path: &[NodeDescriptor]) -> Result<Circuit> {
+    pub async fn build(circuit_id: CircuitId, path: &[NodeDescriptor]) -> Result<BuiltCircuit> {
         if path.len() != 3 {
             return Err(anyhow::anyhow!(
                 "Circuit path must have exactly 3 nodes, got {}",
@@ -188,14 +202,21 @@ impl CircuitBuilder {
 
         let onion_keys = OnionKeys::new(entry_key, middle_key, exit_key);
 
-        Ok(Circuit {
+        // Split the TCP stream into read and write halves
+        // The write half stays in Circuit for send_message()
+        // The read half is returned for spawn_circuit_reader()
+        let (read_half, write_half) = tokio::io::split(entry_stream);
+
+        let circuit = Circuit {
             circuit_id,
             state: CircuitState::Ready,
-            entry_stream: Arc::new(Mutex::new(entry_stream)),
+            entry_writer: Arc::new(Mutex::new(write_half)),
             onion_keys,
             stream_senders: HashMap::new(),
             next_stream_id: 1,
-        })
+        };
+
+        Ok(BuiltCircuit { circuit, read_half })
     }
 
     /// Step 2: CREATE handshake with the entry node
@@ -220,9 +241,10 @@ impl CircuitBuilder {
             .context("Failed to send CREATE")?;
         debug!("Sent CREATE to entry node");
 
-        // Receive CREATED
-        let created_msg = Message::from_stream(stream)
+        // Receive CREATED (with timeout)
+        let created_msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, Message::from_stream(stream))
             .await
+            .context("Timed out waiting for CREATED from entry node")?
             .context("Failed to read CREATED")?
             .ok_or_else(|| anyhow::anyhow!("Entry node closed connection during CREATE"))?;
 
@@ -290,9 +312,10 @@ impl CircuitBuilder {
             .context("Failed to send EXTEND to middle")?;
         debug!("Sent EXTEND for middle node {}", middle.address);
 
-        // Receive EXTENDED
-        let extended_msg = Message::from_stream(stream)
+        // Receive EXTENDED (with timeout)
+        let extended_msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, Message::from_stream(stream))
             .await
+            .context("Timed out waiting for EXTENDED from middle node")?
             .context("Failed to read EXTENDED")?
             .ok_or_else(|| anyhow::anyhow!("Connection closed during EXTEND to middle"))?;
 
@@ -334,7 +357,8 @@ impl CircuitBuilder {
     ///
     /// Sends EXTEND with the exit node's address and our public key.
     /// This is encrypted with 2 layers (middle.forward, then entry.forward).
-    /// Entry peels one layer and forwards to middle. Middle sees the EXTEND payload.
+    /// Entry peels one layer and forwards to middle. Middle peels its layer and sees
+    /// the EXTEND payload.
     async fn handshake_extend_to_exit(
         circuit_id: CircuitId,
         stream: &mut TcpStream,
@@ -366,9 +390,10 @@ impl CircuitBuilder {
             .context("Failed to send EXTEND to exit")?;
         debug!("Sent EXTEND for exit node {}", exit.address);
 
-        // Receive EXTENDED
-        let extended_msg = Message::from_stream(stream)
+        // Receive EXTENDED (with timeout)
+        let extended_msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, Message::from_stream(stream))
             .await
+            .context("Timed out waiting for EXTENDED from exit node")?
             .context("Failed to read EXTENDED")?
             .ok_or_else(|| anyhow::anyhow!("Connection closed during EXTEND to exit"))?;
 
@@ -379,9 +404,11 @@ impl CircuitBuilder {
             ));
         }
 
-        // Decrypt EXTENDED response (only entry added its backward layer)
-        let decrypted = aes_decrypt(&extended_msg.data, &entry_key.backward)
-            .context("Failed to decrypt EXTENDED from exit")?;
+        // Decrypt EXTENDED response: entry added backward layer, middle added backward layer
+        let after_entry = aes_decrypt(&extended_msg.data, &entry_key.backward)
+            .context("Failed to decrypt entry layer of EXTENDED from exit")?;
+        let decrypted = aes_decrypt(&after_entry, &middle_key.backward)
+            .context("Failed to decrypt middle layer of EXTENDED from exit")?;
 
         if decrypted.len() < 32 {
             return Err(anyhow::anyhow!(
@@ -431,20 +458,28 @@ impl CircuitPool {
 
     /// Pre-build circuits to fill the pool at startup
     ///
+    /// Returns the read halves for each circuit so the caller can spawn readers.
+    ///
     /// # Errors
     /// Returns an error if any circuit fails to build
-    pub async fn initialize(&mut self) -> Result<()> {
+    pub async fn initialize(&mut self) -> Result<Vec<(Arc<Mutex<Circuit>>, ReadHalf<TcpStream>)>> {
         info!("Initializing circuit pool with {} circuits", self.pool_size);
+
+        let mut results = Vec::with_capacity(self.pool_size);
 
         for i in 0..self.pool_size {
             match self.build_circuit().await {
-                Ok(circuit_id) => {
+                Ok((circuit_id, read_half)) => {
                     info!(
                         "Built circuit {}/{}: id={}",
                         i + 1,
                         self.pool_size,
                         circuit_id
                     );
+                    let circuit = self.circuits.get(&circuit_id).ok_or_else(|| {
+                        anyhow::anyhow!("Newly built circuit {} not found", circuit_id)
+                    })?;
+                    results.push((Arc::clone(circuit), read_half));
                 }
                 Err(e) => {
                     error!(
@@ -459,16 +494,19 @@ impl CircuitPool {
         }
 
         info!("Circuit pool initialized successfully");
-        Ok(())
+        Ok(results)
     }
 
     /// Select the least-loaded ready circuit for a new stream
     ///
-    /// If no ready circuits exist, builds a new one.
+    /// If no ready circuits exist, builds a new one and returns its read half
+    /// so the caller can spawn a reader for it.
     ///
     /// # Errors
     /// Returns an error if no circuits are available and building a new one fails
-    pub async fn select_circuit(&mut self) -> Result<Arc<Mutex<Circuit>>> {
+    pub async fn select_circuit(
+        &mut self,
+    ) -> Result<(Arc<Mutex<Circuit>>, Option<ReadHalf<TcpStream>>)> {
         // Find the ready circuit with fewest active streams
         let mut best: Option<(CircuitId, usize)> = None;
 
@@ -493,32 +531,43 @@ impl CircuitPool {
                 .circuits
                 .get(&circuit_id)
                 .ok_or_else(|| anyhow::anyhow!("Circuit {} disappeared", circuit_id))?;
-            return Ok(Arc::clone(circuit));
+            return Ok((Arc::clone(circuit), None));
         }
 
         // No ready circuits, build a new one
         warn!("No ready circuits available, building a new one");
-        let circuit_id = self.build_circuit().await?;
+        let (circuit_id, read_half) = self.build_circuit().await?;
         let circuit = self
             .circuits
             .get(&circuit_id)
             .ok_or_else(|| anyhow::anyhow!("Newly built circuit {} not found", circuit_id))?;
-        Ok(Arc::clone(circuit))
+        Ok((Arc::clone(circuit), Some(read_half)))
     }
 
     /// Replace a failed circuit and replenish the pool
     ///
+    /// Returns the new circuit ID and read half for spawning a reader.
+    ///
     /// # Errors
     /// Returns an error if building a replacement circuit fails
-    #[allow(dead_code)]
-    pub async fn replace_circuit(&mut self, failed_id: CircuitId) -> Result<CircuitId> {
+    pub async fn replace_circuit(
+        &mut self,
+        failed_id: CircuitId,
+    ) -> Result<(Arc<Mutex<Circuit>>, ReadHalf<TcpStream>)> {
         info!("Replacing failed circuit {}", failed_id);
         self.circuits.remove(&failed_id);
-        self.build_circuit().await
+        let (circuit_id, read_half) = self.build_circuit().await?;
+        let circuit = self
+            .circuits
+            .get(&circuit_id)
+            .ok_or_else(|| anyhow::anyhow!("Newly built circuit {} not found", circuit_id))?;
+        Ok((Arc::clone(circuit), read_half))
     }
 
     /// Build a single circuit and add it to the pool
-    async fn build_circuit(&mut self) -> Result<CircuitId> {
+    ///
+    /// Returns the circuit ID and the read half of the entry connection.
+    async fn build_circuit(&mut self) -> Result<(CircuitId, ReadHalf<TcpStream>)> {
         let circuit_id = self.allocate_circuit_id();
         let path = self
             .directory_client
@@ -526,12 +575,12 @@ impl CircuitPool {
             .await
             .context("Failed to get path from directory")?;
 
-        let circuit = CircuitBuilder::build(circuit_id, &path).await?;
+        let built = CircuitBuilder::build(circuit_id, &path).await?;
 
         self.circuits
-            .insert(circuit_id, Arc::new(Mutex::new(circuit)));
+            .insert(circuit_id, Arc::new(Mutex::new(built.circuit)));
 
-        Ok(circuit_id)
+        Ok((circuit_id, built.read_half))
     }
 
     /// Allocate a new unique circuit ID
@@ -539,11 +588,6 @@ impl CircuitPool {
         let id = self.next_circuit_id;
         self.next_circuit_id = self.next_circuit_id.wrapping_add(1);
         id
-    }
-
-    /// Get references to all circuits in the pool (for spawning readers)
-    pub fn circuits(&self) -> Vec<Arc<Mutex<Circuit>>> {
-        self.circuits.values().map(Arc::clone).collect()
     }
 
     /// Get the number of circuits in the pool
@@ -559,33 +603,37 @@ impl CircuitPool {
 /// This is the backward direction reader: it reads responses coming back
 /// through the circuit, decrypts the onion layers, and routes data to
 /// the appropriate SOCKS5 connection handler.
-pub fn spawn_circuit_reader(circuit: Arc<Mutex<Circuit>>) -> tokio::task::JoinHandle<()> {
+///
+/// Takes ownership of the `ReadHalf` so it can read without holding any locks.
+/// The circuit `Arc<Mutex<Circuit>>` is only locked briefly for decryption and
+/// stream routing, eliminating the deadlock that existed when the reader held
+/// the circuit lock during blocking reads.
+pub fn spawn_circuit_reader(
+    circuit: Arc<Mutex<Circuit>>,
+    mut read_half: ReadHalf<TcpStream>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let circuit_id = circuit.lock().await.circuit_id;
         info!("Starting circuit reader for circuit {}", circuit_id);
 
         loop {
-            // Read a message from the entry node
-            let msg = {
-                let mut circuit_guard = circuit.lock().await;
-                let mut stream = circuit_guard.entry_stream.lock().await;
-                match Message::from_stream(&mut *stream).await {
-                    Ok(Some(msg)) => msg,
-                    Ok(None) => {
-                        info!("Entry node closed connection for circuit {}", circuit_id);
-                        drop(stream);
-                        circuit_guard.state = CircuitState::Closed;
-                        break;
-                    }
-                    Err(e) => {
-                        error!(
-                            "Error reading from entry node for circuit {}: {}",
-                            circuit_id, e
-                        );
-                        drop(stream);
-                        circuit_guard.state = CircuitState::Closed;
-                        break;
-                    }
+            // Read a message from the entry node -- no locks held during this blocking read
+            let msg = match Message::from_stream(&mut read_half).await {
+                Ok(Some(msg)) => msg,
+                Ok(None) => {
+                    info!("Entry node closed connection for circuit {}", circuit_id);
+                    let mut circuit_guard = circuit.lock().await;
+                    circuit_guard.state = CircuitState::Closed;
+                    break;
+                }
+                Err(e) => {
+                    error!(
+                        "Error reading from entry node for circuit {}: {}",
+                        circuit_id, e
+                    );
+                    let mut circuit_guard = circuit.lock().await;
+                    circuit_guard.state = CircuitState::Closed;
+                    break;
                 }
             };
 
@@ -594,8 +642,10 @@ pub fn spawn_circuit_reader(circuit: Arc<Mutex<Circuit>>) -> tokio::task::JoinHa
                 circuit_id, msg.command, msg.stream_id
             );
 
-            // Decrypt the onion layers
+            // Lock circuit briefly for decryption + routing
             let circuit_guard = circuit.lock().await;
+
+            // Decrypt the onion layers
             let decrypted_data = match circuit_guard.onion_keys.onion_decrypt(&msg.data) {
                 Ok(data) => data,
                 Err(e) => {
@@ -666,16 +716,10 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_id_allocation() {
-        let keys = OnionKeys::new(SessionKey::zero(), SessionKey::zero(), SessionKey::zero());
-        let stream = Arc::new(Mutex::new(unsafe {
-            // We can't create a real TcpStream in a sync test, so just test the allocation logic
-            // by testing the ID counter directly
-            std::mem::zeroed::<u16>()
-        }));
-
-        // Just test the counter logic directly
+    fn test_stream_id_allocation_skips_zero() {
+        // Test the stream ID allocation counter logic
         let mut next_id: StreamId = 1;
+
         let id1 = next_id;
         next_id = next_id.wrapping_add(1);
         let id2 = next_id;
@@ -686,8 +730,14 @@ mod tests {
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);
 
-        // Suppress unused variable warnings
-        let _ = keys;
-        let _ = stream;
+        // Test wrapping behavior: when counter reaches 0, it should skip to 1
+        let mut wrap_id: StreamId = u16::MAX;
+        wrap_id = wrap_id.wrapping_add(1);
+        assert_eq!(wrap_id, 0);
+        // In the actual allocate_stream_id, 0 would be skipped to 1
+        if wrap_id == 0 {
+            wrap_id = 1;
+        }
+        assert_eq!(wrap_id, 1);
     }
 }

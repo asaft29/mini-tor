@@ -4,7 +4,7 @@ mod crypto_engine;
 mod directory_client;
 mod stream;
 
-use crate::circuit::{CircuitPool, spawn_circuit_reader};
+use crate::circuit::{CircuitPool, CircuitState, spawn_circuit_reader};
 use crate::config::TorClientConfig;
 use crate::directory_client::DirectoryClient;
 use crate::stream::handle_stream;
@@ -32,13 +32,14 @@ async fn main() -> Result<()> {
     // Create directory client and circuit pool
     let directory_client = DirectoryClient::new(config.directory_url.clone());
     let mut pool = CircuitPool::new(directory_client, config.pool_size);
-    pool.initialize()
+    let built_circuits = pool
+        .initialize()
         .await
         .context("Failed to initialize circuit pool")?;
 
     // Spawn background readers for each pre-built circuit
-    for circuit in pool.circuits() {
-        spawn_circuit_reader(Arc::clone(&circuit));
+    for (circuit, read_half) in built_circuits {
+        spawn_circuit_reader(circuit, read_half);
     }
 
     let pool = Arc::new(Mutex::new(pool));
@@ -127,16 +128,44 @@ async fn handle_connection(
     let destination = req.dst.to_string();
     info!("SOCKS5 CONNECT from {} to {}", addr, destination);
 
-    // Select least-loaded circuit
-    let circuit = {
+    // Select least-loaded circuit (may build a new one if pool is exhausted)
+    let (circuit, maybe_read_half) = {
         let mut p = pool.lock().await;
         p.select_circuit()
             .await
             .context("Failed to select circuit")?
     };
 
+    // If a new circuit was built, spawn a reader for it (fixes Bug #3)
+    if let Some(read_half) = maybe_read_half {
+        spawn_circuit_reader(Arc::clone(&circuit), read_half);
+    }
+
     // Route through onion circuit
     // handle_stream sends BEGIN, waits for CONNECTED, sends SOCKS5 reply,
     // and relays data bidirectionally
-    handle_stream(circuit, stream, destination).await
+    let result = handle_stream(Arc::clone(&circuit), stream, destination).await;
+
+    // If the stream failed, check if the circuit is dead and replace it
+    if result.is_err() {
+        let circuit_guard = circuit.lock().await;
+        if circuit_guard.state == CircuitState::Closed {
+            let failed_id = circuit_guard.circuit_id;
+            drop(circuit_guard); // Release lock before replacing
+
+            warn!("Circuit {} is closed, scheduling replacement", failed_id);
+            let mut p = pool.lock().await;
+            match p.replace_circuit(failed_id).await {
+                Ok((new_circuit, read_half)) => {
+                    spawn_circuit_reader(new_circuit, read_half);
+                    info!("Successfully replaced failed circuit {}", failed_id);
+                }
+                Err(e) => {
+                    error!("Failed to replace circuit {}: {}", failed_id, e);
+                }
+            }
+        }
+    }
+
+    result
 }
