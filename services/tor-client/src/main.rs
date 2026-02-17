@@ -1,13 +1,3 @@
-mod circuit;
-mod config;
-mod crypto_engine;
-mod directory_client;
-mod stream;
-
-use crate::circuit::{CircuitPool, CircuitState, spawn_circuit_reader};
-use crate::config::TorClientConfig;
-use crate::directory_client::DirectoryClient;
-use crate::stream::handle_stream;
 use anyhow::{Context, Result};
 use clap::Parser;
 use simple_socks5::conn::reply::Rep;
@@ -17,6 +7,10 @@ use simple_socks5::{ATYP, Socks5};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tor_client::circuit::{CircuitPool, CircuitState, spawn_circuit_reader};
+use tor_client::config::TorClientConfig;
+use tor_client::directory_client::DirectoryClient;
+use tor_client::stream::handle_stream;
 use tracing::{error, info, warn};
 
 #[tokio::main]

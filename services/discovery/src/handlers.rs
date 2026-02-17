@@ -21,6 +21,9 @@ pub struct NodesResponse {
 }
 
 /// Register a new node
+///
+/// # Errors
+/// Returns 422 if node ID is empty or bandwidth is zero.
 #[utoipa::path(
     post,
     path = "/api/nodes/register",
@@ -54,6 +57,9 @@ pub async fn register_node(
 }
 
 /// Get all nodes
+///
+/// # Errors
+/// Returns an internal error if the registry lock is poisoned.
 #[utoipa::path(
     get,
     path = "/api/nodes",
@@ -71,6 +77,9 @@ pub async fn get_all_nodes(State(registry): State<AppState>) -> Result<Json<Node
 }
 
 /// Get random path for circuit (always returns 3 nodes: entry, middle, exit)
+///
+/// # Errors
+/// Returns 503 if there are insufficient nodes to build a 3-hop path.
 #[utoipa::path(
     get,
     path = "/api/nodes/random",
@@ -91,6 +100,9 @@ pub async fn get_random_path(
 }
 
 /// Update node heartbeat
+///
+/// # Errors
+/// Returns 404 if the specified node ID is not found.
 #[utoipa::path(
     post,
     path = "/api/nodes/{id}/heartbeat",
@@ -114,6 +126,9 @@ pub async fn update_heartbeat(
 }
 
 /// Remove a node
+///
+/// # Errors
+/// Returns 404 if the specified node ID is not found.
 #[utoipa::path(
     delete,
     path = "/api/nodes/{id}",
@@ -137,6 +152,9 @@ pub async fn remove_node(
 }
 
 /// Get registry statistics
+///
+/// # Errors
+/// Returns an internal error if the registry lock is poisoned.
 #[utoipa::path(
     get,
     path = "/api/stats",
@@ -192,6 +210,9 @@ pub async fn health_check(State(registry): State<AppState>) -> impl IntoResponse
 /// Readiness check endpoint
 /// Returns 200 if ready to serve traffic (enough nodes available)
 /// Returns 503 if not ready (insufficient nodes)
+///
+/// # Errors
+/// Returns 503 if insufficient nodes are available to build circuits.
 #[utoipa::path(
     get,
     path = "/ready",

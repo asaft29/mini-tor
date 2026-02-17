@@ -383,3 +383,199 @@ impl ExitCircuitHandler {
         self.streams.clear();
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::circuit::handler::CircuitState;
+    use common::crypto::{EphemeralKeyPair, aes_decrypt, aes_encrypt, derive_session_key};
+    use tokio::net::TcpListener;
+
+    /// Helper: establish a session between client ephemeral key and exit handler,
+    /// returning the client-side session key.
+    async fn setup_exit_handler(handler: &mut ExitCircuitHandler) -> (SessionKey, [u8; 32]) {
+        let ephemeral = EphemeralKeyPair::generate();
+        let client_public = ephemeral.public.bytes;
+        let create_msg = Message::create(handler.circuit_id(), client_public.to_vec());
+
+        let created = handler.handle_create(create_msg).await.unwrap().unwrap();
+        let mut exit_public = [0u8; 32];
+        exit_public.copy_from_slice(&created.data[0..32]);
+        let shared = ephemeral.diffie_hellman(&exit_public);
+        let key = derive_session_key(&shared);
+        (key, exit_public)
+    }
+
+    #[tokio::test]
+    async fn test_exit_create_handshake() {
+        let keypair = KeyPair::generate();
+        let mut handler = ExitCircuitHandler::new(100, keypair.clone());
+
+        let ephemeral = EphemeralKeyPair::generate();
+        let create_msg = Message::create(100, ephemeral.public.bytes.to_vec());
+        let response = handler.handle_create(create_msg).await.unwrap().unwrap();
+
+        assert_eq!(response.command, MessageCommand::Created);
+        assert_eq!(response.circuit_id, 100);
+        assert_eq!(response.data.len(), 32);
+        assert_eq!(handler.state(), CircuitState::Active);
+
+        // Verify DH key agreement
+        let mut exit_public = [0u8; 32];
+        exit_public.copy_from_slice(&response.data[0..32]);
+        let client_shared = ephemeral.diffie_hellman(&exit_public);
+        let client_key = derive_session_key(&client_shared);
+        assert_eq!(client_key, *handler.session_key().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_exit_create_too_short() {
+        let keypair = KeyPair::generate();
+        let mut handler = ExitCircuitHandler::new(100, keypair);
+
+        let create_msg = Message::create(100, vec![0u8; 5]);
+        let result = handler.handle_create(create_msg).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_exit_data_unknown_stream_returns_end() {
+        let keypair = KeyPair::generate();
+        let mut handler = ExitCircuitHandler::new(100, keypair.clone());
+        let (session_key, _) = setup_exit_handler(&mut handler).await;
+
+        // Send DATA for a stream that doesn't exist
+        let encrypted_data = aes_encrypt(b"hello", &session_key.forward);
+        let data_msg = Message::data(100, 99, encrypted_data);
+
+        let response = handler
+            .handle_message(data_msg, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Should return END with "Stream not found"
+        assert_eq!(response.command, MessageCommand::End);
+        assert_eq!(response.stream_id, 99);
+        let decrypted = aes_decrypt(&response.data, &session_key.backward).unwrap();
+        assert!(
+            String::from_utf8_lossy(&decrypted).contains("Stream not found"),
+            "Expected 'Stream not found', got: {}",
+            String::from_utf8_lossy(&decrypted)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exit_end_unknown_stream() {
+        let keypair = KeyPair::generate();
+        let mut handler = ExitCircuitHandler::new(100, keypair.clone());
+        let (_session_key, _) = setup_exit_handler(&mut handler).await;
+
+        // Send END for unknown stream — should still succeed
+        let end_msg = Message::end(100, 55, vec![]);
+        let response = handler
+            .handle_message(end_msg, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(response.command, MessageCommand::End);
+        assert_eq!(response.stream_id, 55);
+    }
+
+    #[tokio::test]
+    async fn test_exit_destroy_clears_streams() {
+        let keypair = KeyPair::generate();
+        let mut handler = ExitCircuitHandler::new(100, keypair.clone());
+        let _ = setup_exit_handler(&mut handler).await;
+
+        assert_eq!(handler.state(), CircuitState::Active);
+
+        let destroy_msg = Message::destroy(100);
+        let result = handler.handle_message(destroy_msg, None).await.unwrap();
+        assert!(result.is_none());
+        assert_eq!(handler.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_exit_begin_connects_to_destination() {
+        // Set up a fake destination server
+        let dest_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dest_addr = dest_listener.local_addr().unwrap();
+
+        // Spawn destination that accepts and does nothing (just stays alive briefly)
+        let dest_task = tokio::spawn(async move {
+            let (_stream, _) = dest_listener.accept().await.unwrap();
+            // Keep connection alive for test
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let keypair = KeyPair::generate();
+        let mut handler = ExitCircuitHandler::new(100, keypair.clone());
+        let (session_key, _) = setup_exit_handler(&mut handler).await;
+
+        // We need a prev_hop_stream for BEGIN
+        let prev_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let prev_addr = prev_listener.local_addr().unwrap();
+        let prev_connect =
+            tokio::spawn(async move { TcpStream::connect(prev_addr).await.unwrap() });
+        let (prev_server, _) = prev_listener.accept().await.unwrap();
+        let _prev_client = prev_connect.await.unwrap();
+        let prev_hop = Arc::new(Mutex::new(prev_server));
+
+        // Build BEGIN payload: "host:port\0" encrypted with forward key
+        let dest_str = format!("{}\0", dest_addr);
+        let encrypted_dest = aes_encrypt(dest_str.as_bytes(), &session_key.forward);
+        let begin_msg = Message::begin(100, 1, encrypted_dest);
+
+        let response = handler
+            .handle_message(begin_msg, Some(prev_hop))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Should return CONNECTED
+        assert_eq!(response.command, MessageCommand::Connected);
+        assert_eq!(response.circuit_id, 100);
+        assert_eq!(response.stream_id, 1);
+
+        // CONNECTED data is encrypted with backward key
+        let decrypted = aes_decrypt(&response.data, &session_key.backward).unwrap();
+        // CONNECTED data is empty (from Message::connected)
+        assert!(decrypted.is_empty());
+
+        dest_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_exit_begin_unreachable_destination() {
+        let keypair = KeyPair::generate();
+        let mut handler = ExitCircuitHandler::new(100, keypair.clone());
+        let (session_key, _) = setup_exit_handler(&mut handler).await;
+
+        // prev_hop_stream
+        let prev_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let prev_addr = prev_listener.local_addr().unwrap();
+        let prev_connect =
+            tokio::spawn(async move { TcpStream::connect(prev_addr).await.unwrap() });
+        let (prev_server, _) = prev_listener.accept().await.unwrap();
+        let _prev_client = prev_connect.await.unwrap();
+        let prev_hop = Arc::new(Mutex::new(prev_server));
+
+        // Try to connect to an address that should refuse connections
+        let dest_str = "127.0.0.1:1\0"; // port 1 is very unlikely to be open
+        let encrypted_dest = aes_encrypt(dest_str.as_bytes(), &session_key.forward);
+        let begin_msg = Message::begin(100, 2, encrypted_dest);
+
+        let response = handler
+            .handle_message(begin_msg, Some(prev_hop))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Should return END with connection failure reason
+        assert_eq!(response.command, MessageCommand::End);
+        assert_eq!(response.stream_id, 2);
+    }
+}

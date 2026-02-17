@@ -319,3 +319,189 @@ impl EntryCircuitHandler {
         }))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::circuit::handler::CircuitState;
+    use common::crypto::{EphemeralKeyPair, aes_decrypt, derive_session_key};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_entry_create_handshake() {
+        let keypair = KeyPair::generate();
+        let mut handler = EntryCircuitHandler::new(1, keypair.clone());
+
+        // Client generates ephemeral keypair and sends CREATE
+        let ephemeral = EphemeralKeyPair::generate();
+        let client_public = ephemeral.public.bytes;
+        let create_msg = Message::create(1, client_public.to_vec());
+
+        let response = handler.handle_create(create_msg).await.unwrap();
+        let response = response.unwrap();
+
+        // Should return CREATED with relay's public key
+        assert_eq!(response.command, MessageCommand::Created);
+        assert_eq!(response.circuit_id, 1);
+        assert_eq!(response.data.len(), 32);
+
+        // Handler should be activated
+        assert_eq!(handler.state(), CircuitState::Active);
+        assert!(handler.session_key().is_some());
+
+        // Both sides should derive the same session key
+        let mut relay_public = [0u8; 32];
+        relay_public.copy_from_slice(&response.data[0..32]);
+        let client_shared = ephemeral.diffie_hellman(&relay_public);
+        let client_key = derive_session_key(&client_shared);
+
+        let relay_key = handler.session_key().unwrap();
+        assert_eq!(client_key, *relay_key);
+    }
+
+    #[tokio::test]
+    async fn test_entry_create_too_short() {
+        let keypair = KeyPair::generate();
+        let mut handler = EntryCircuitHandler::new(1, keypair);
+
+        // Send CREATE with too-short payload (< 32 bytes)
+        let create_msg = Message::create(1, vec![0u8; 16]);
+        let result = handler.handle_create(create_msg).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too short"));
+    }
+
+    #[tokio::test]
+    async fn test_entry_backward_relay_encrypts() {
+        let keypair = KeyPair::generate();
+        let mut handler = EntryCircuitHandler::new(1, keypair.clone());
+
+        // First, establish the circuit via CREATE
+        let ephemeral = EphemeralKeyPair::generate();
+        let create_msg = Message::create(1, ephemeral.public.bytes.to_vec());
+        let created = handler.handle_create(create_msg).await.unwrap().unwrap();
+
+        // Derive session key on client side
+        let mut relay_public = [0u8; 32];
+        relay_public.copy_from_slice(&created.data[0..32]);
+        let client_shared = ephemeral.diffie_hellman(&relay_public);
+        let client_key = derive_session_key(&client_shared);
+
+        // Simulate a backward DATA message (e.g., from middle/exit)
+        let plaintext = b"Hello from exit node";
+        let backward_msg = Message::data(1, 5, plaintext.to_vec());
+
+        let response = handler
+            .handle_backward_relay(backward_msg)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Response should be encrypted with backward key
+        assert_eq!(response.command, MessageCommand::Data);
+        assert_eq!(response.circuit_id, 1);
+        assert_eq!(response.stream_id, 5);
+
+        // Client can decrypt with backward key
+        let decrypted = aes_decrypt(&response.data, &client_key.backward).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[tokio::test]
+    async fn test_entry_backward_relay_no_session_key() {
+        let keypair = KeyPair::generate();
+        let mut handler = EntryCircuitHandler::new(1, keypair);
+
+        // Try backward relay without establishing circuit
+        let msg = Message::data(1, 1, b"test".to_vec());
+        let result = handler.handle_backward_relay(msg).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No session key"));
+    }
+
+    #[tokio::test]
+    async fn test_entry_destroy_closes_circuit() {
+        let keypair = KeyPair::generate();
+        let mut handler = EntryCircuitHandler::new(1, keypair.clone());
+
+        // Establish circuit
+        let ephemeral = EphemeralKeyPair::generate();
+        let create_msg = Message::create(1, ephemeral.public.bytes.to_vec());
+        handler.handle_create(create_msg).await.unwrap();
+
+        assert_eq!(handler.state(), CircuitState::Active);
+
+        // Send DESTROY
+        let destroy_msg = Message::destroy(1);
+        let result = handler.handle_message(destroy_msg).await.unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(handler.state(), CircuitState::Closed);
+        assert!(handler.session_key().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_entry_extend_to_middle_over_tcp() {
+        // Set up a fake "middle node" listener
+        let middle_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let middle_addr = middle_listener.local_addr().unwrap();
+        let middle_keypair = KeyPair::generate();
+        let middle_public = middle_keypair.public_key().bytes;
+
+        // Spawn fake middle node that responds to CREATE with CREATED
+        let middle_kp_clone = middle_keypair.clone();
+        let middle_task = tokio::spawn(async move {
+            let (mut stream, _) = middle_listener.accept().await.unwrap();
+            let msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
+            assert_eq!(msg.command, MessageCommand::Create);
+
+            // Respond with CREATED
+            let created =
+                Message::created(msg.circuit_id, middle_kp_clone.public_key().bytes.to_vec());
+            stream.write_all(&created.to_bytes()).await.unwrap();
+        });
+
+        // Set up entry handler with established circuit
+        let entry_keypair = KeyPair::generate();
+        let mut handler = EntryCircuitHandler::new(42, entry_keypair.clone());
+
+        let ephemeral = EphemeralKeyPair::generate();
+        let client_public = ephemeral.public.bytes;
+        let create_msg = Message::create(42, client_public.to_vec());
+        let created_response = handler.handle_create(create_msg).await.unwrap().unwrap();
+
+        // Derive client-side session key
+        let mut relay_public = [0u8; 32];
+        relay_public.copy_from_slice(&created_response.data[0..32]);
+        let client_shared = ephemeral.diffie_hellman(&relay_public);
+        let entry_key = derive_session_key(&client_shared);
+
+        // Build EXTEND payload: "addr:port\0" + middle_public_key
+        let addr_str = middle_addr.to_string();
+        let mut extend_payload = Vec::new();
+        extend_payload.extend_from_slice(addr_str.as_bytes());
+        extend_payload.push(0);
+        extend_payload.extend_from_slice(&middle_public);
+
+        // Encrypt with entry forward key (client encrypts)
+        let encrypted_payload = common::crypto::aes_encrypt(&extend_payload, &entry_key.forward);
+
+        // Send EXTEND
+        let extend_msg = Message::extend(42, encrypted_payload);
+        let response = handler.handle_message(extend_msg).await.unwrap().unwrap();
+
+        // Should return EXTENDED with middle's public key (encrypted with entry backward)
+        assert_eq!(response.command, MessageCommand::Extended);
+        assert_eq!(response.circuit_id, 42);
+
+        // Decrypt the EXTENDED response
+        let decrypted = aes_decrypt(&response.data, &entry_key.backward).unwrap();
+        assert_eq!(decrypted.len(), 32);
+        assert_eq!(&decrypted[..], &middle_public);
+
+        middle_task.await.unwrap();
+    }
+}

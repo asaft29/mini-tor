@@ -1,10 +1,5 @@
-mod doc;
-mod error;
-mod handlers;
-mod registry;
-mod routes;
-
-use registry::NodeRegistry;
+use discovery::registry::NodeRegistry;
+use discovery::routes;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 

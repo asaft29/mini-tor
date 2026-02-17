@@ -96,6 +96,9 @@ impl NodeRegistry {
     }
 
     /// Load consensus from disk
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or parsed as JSON.
     pub async fn load(&mut self) -> anyhow::Result<()> {
         if !self.consensus_path.exists() {
             tracing::info!("No consensus file found, starting fresh");
@@ -117,6 +120,9 @@ impl NodeRegistry {
     }
 
     /// Save consensus to disk
+    ///
+    /// # Errors
+    /// Returns an error if serialization or file writing fails.
     pub async fn save(&self) -> anyhow::Result<()> {
         let consensus = Consensus::new(chrono::Utc::now(), self.get_all_nodes());
 
@@ -166,6 +172,9 @@ impl NodeRegistry {
     }
 
     /// Get random path for circuit building (always returns 3 nodes: entry, middle, exit)
+    ///
+    /// # Errors
+    /// Returns `InsufficientNodes` if any node type (entry, middle, exit) is missing.
     pub fn get_random_path(&self) -> Result<Vec<Arc<NodeDescriptor>>, RegistryError> {
         let entry_nodes = self.get_nodes_by_type(NodeType::Entry);
         let middle_nodes = self.get_nodes_by_type(NodeType::Middle);
@@ -232,6 +241,9 @@ impl NodeRegistry {
     }
 
     /// Update node heartbeat
+    ///
+    /// # Errors
+    /// Returns `NodeNotFound` if no node exists with the given ID.
     pub fn update_heartbeat(&mut self, node_id: &str) -> Result<(), RegistryError> {
         let entry = self
             .nodes
@@ -244,6 +256,9 @@ impl NodeRegistry {
     }
 
     /// Remove a node
+    ///
+    /// # Errors
+    /// Returns `NodeNotFound` if no node exists with the given ID.
     pub fn remove_node(&mut self, node_id: &str) -> Result<(), RegistryError> {
         self.nodes
             .remove(node_id)
@@ -323,5 +338,223 @@ impl NodeRegistry {
             oldest_node_age_secs,
             newest_node_age_secs,
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use common::PublicKey;
+
+    /// Helper: create a NodeDescriptor with minimal boilerplate
+    fn make_node(id: &str, node_type: NodeType, bandwidth: u64) -> NodeDescriptor {
+        NodeDescriptor::new(
+            id.to_string(),
+            node_type,
+            "127.0.0.1:9001".parse().unwrap(),
+            PublicKey::new([0u8; 32]),
+            bandwidth,
+            None,
+        )
+    }
+
+    /// Helper: create a fresh NodeRegistry with a dummy consensus path
+    fn make_registry() -> NodeRegistry {
+        NodeRegistry::new(PathBuf::from("/tmp/test-consensus.json"))
+    }
+
+    #[test]
+    fn test_register_and_get_all() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("node-1", NodeType::Entry, 1_000_000));
+
+        let nodes = reg.get_all_nodes();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, "node-1");
+        assert_eq!(nodes[0].node_type, NodeType::Entry);
+    }
+
+    #[test]
+    fn test_register_multiple() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 2_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 3_000_000));
+
+        let nodes = reg.get_all_nodes();
+        assert_eq!(nodes.len(), 3);
+    }
+
+    #[test]
+    fn test_register_duplicate_updates() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("node-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("node-1", NodeType::Entry, 5_000_000));
+
+        let nodes = reg.get_all_nodes();
+        assert_eq!(nodes.len(), 1, "duplicate should update, not add");
+        assert_eq!(nodes[0].bandwidth, 5_000_000, "bandwidth should be updated");
+    }
+
+    #[test]
+    fn test_get_nodes_by_type() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("entry-2", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        assert_eq!(reg.get_nodes_by_type(NodeType::Entry).len(), 2);
+        assert_eq!(reg.get_nodes_by_type(NodeType::Middle).len(), 1);
+        assert_eq!(reg.get_nodes_by_type(NodeType::Exit).len(), 1);
+    }
+
+    #[test]
+    fn test_get_random_path_success() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let path = reg.get_random_path().unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0].node_type, NodeType::Entry);
+        assert_eq!(path[1].node_type, NodeType::Middle);
+        assert_eq!(path[2].node_type, NodeType::Exit);
+    }
+
+    #[test]
+    fn test_get_random_path_no_entry() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let err = reg.get_random_path().unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_get_random_path_no_middle() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let err = reg.get_random_path().unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_get_random_path_no_exit() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+
+        let err = reg.get_random_path().unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_get_random_path_empty() {
+        let reg = make_registry();
+
+        let err = reg.get_random_path().unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_update_heartbeat_existing() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("node-1", NodeType::Entry, 1_000_000));
+
+        assert!(reg.update_heartbeat("node-1").is_ok());
+    }
+
+    #[test]
+    fn test_update_heartbeat_missing() {
+        let mut reg = make_registry();
+
+        let err = reg.update_heartbeat("nonexistent").unwrap_err();
+        assert!(matches!(err, RegistryError::NodeNotFound(_)));
+    }
+
+    #[test]
+    fn test_remove_node_existing() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("node-1", NodeType::Entry, 1_000_000));
+
+        assert!(reg.remove_node("node-1").is_ok());
+        assert!(reg.get_all_nodes().is_empty());
+    }
+
+    #[test]
+    fn test_remove_node_missing() {
+        let mut reg = make_registry();
+
+        let err = reg.remove_node("nonexistent").unwrap_err();
+        assert!(matches!(err, RegistryError::NodeNotFound(_)));
+    }
+
+    #[test]
+    fn test_cleanup_stale_nodes() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("node-1", NodeType::Entry, 1_000_000));
+
+        // Sleep briefly so the heartbeat becomes stale
+        std::thread::sleep(Duration::from_millis(50));
+
+        let removed = reg.cleanup_stale_nodes(Duration::from_millis(10));
+        assert_eq!(removed, 1);
+        assert!(reg.get_all_nodes().is_empty());
+    }
+
+    #[test]
+    fn test_is_ready() {
+        let mut reg = make_registry();
+
+        // Empty registry is not ready
+        assert!(!reg.is_ready());
+
+        // Only entry — not ready
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        assert!(!reg.is_ready());
+
+        // Entry + middle — not ready
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        assert!(!reg.is_ready());
+
+        // Entry + middle + exit — ready
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+        assert!(reg.is_ready());
+    }
+
+    #[test]
+    fn test_get_stats() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("entry-2", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let stats = reg.get_stats();
+        assert_eq!(stats.total_nodes, 4);
+        assert_eq!(stats.entry_count, 2);
+        assert_eq!(stats.middle_count, 1);
+        assert_eq!(stats.exit_count, 1);
+        assert!(stats.oldest_node_age_secs.is_some());
+        assert!(stats.newest_node_age_secs.is_some());
+    }
+
+    #[test]
+    fn test_get_stats_empty() {
+        let reg = make_registry();
+
+        let stats = reg.get_stats();
+        assert_eq!(stats.total_nodes, 0);
+        assert_eq!(stats.entry_count, 0);
+        assert_eq!(stats.middle_count, 0);
+        assert_eq!(stats.exit_count, 0);
+        assert!(stats.oldest_node_age_secs.is_none());
+        assert!(stats.newest_node_age_secs.is_none());
     }
 }

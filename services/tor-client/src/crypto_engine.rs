@@ -213,4 +213,91 @@ mod tests {
         let decrypted = aes_decrypt(&after_entry, &keys.middle.forward).unwrap();
         assert_eq!(decrypted, plaintext);
     }
+
+    #[test]
+    fn test_simulated_relay_backward_path() {
+        // Simulate what relays do in the backward direction:
+        // Exit encrypts with exit.backward, middle encrypts with middle.backward,
+        // entry encrypts with entry.backward. Client onion_decrypt() peels all 3.
+        let keys = test_keys();
+        let plaintext = b"response from destination";
+
+        // Exit node encrypts first
+        let after_exit = aes_encrypt(plaintext, &keys.exit.backward);
+        // Middle node adds its layer
+        let after_middle = aes_encrypt(&after_exit, &keys.middle.backward);
+        // Entry node adds its layer
+        let after_entry = aes_encrypt(&after_middle, &keys.entry.backward);
+
+        // Client peels all 3 layers
+        let decrypted = keys.onion_decrypt(&after_entry).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_extended_from_middle_roundtrip() {
+        let keys = test_keys();
+        let plaintext = b"EXTENDED response from middle";
+
+        // Entry node encrypts the EXTENDED response with its backward key
+        let encrypted = aes_encrypt(plaintext, &keys.entry.backward);
+
+        // Client decrypts
+        let decrypted = keys.decrypt_extended_from_middle(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_extended_from_exit_roundtrip() {
+        let keys = test_keys();
+        let plaintext = b"EXTENDED response from exit";
+
+        // Middle encrypts with its backward key, then entry encrypts with its backward key
+        let after_middle = aes_encrypt(plaintext, &keys.middle.backward);
+        let after_entry = aes_encrypt(&after_middle, &keys.entry.backward);
+
+        // Client decrypts both layers
+        let decrypted = keys.decrypt_extended_from_exit(&after_entry).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_large_payload_64kb() {
+        // Use symmetric keys so encrypt + decrypt is a true roundtrip
+        let keys = OnionKeys::new(
+            SessionKey::new([1u8; 16], [1u8; 16]),
+            SessionKey::new([2u8; 16], [2u8; 16]),
+            SessionKey::new([3u8; 16], [3u8; 16]),
+        );
+        let plaintext: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+
+        let encrypted = keys.onion_encrypt(&plaintext);
+        let decrypted = keys.onion_decrypt(&encrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_corrupted_ciphertext() {
+        let keys = OnionKeys::new(
+            SessionKey::new([1u8; 16], [1u8; 16]),
+            SessionKey::new([2u8; 16], [2u8; 16]),
+            SessionKey::new([3u8; 16], [3u8; 16]),
+        );
+        let plaintext = b"sensitive data here";
+
+        let mut encrypted = keys.onion_encrypt(plaintext);
+
+        // Corrupt a byte in the ciphertext (after the outermost IV)
+        let last_idx = encrypted.len() - 1;
+        encrypted[last_idx] ^= 0xFF;
+
+        // Decryption should succeed (CTR mode doesn't authenticate)
+        // but produce wrong plaintext
+        let decrypted = keys.onion_decrypt(&encrypted).unwrap();
+        assert_ne!(
+            decrypted, plaintext,
+            "corrupted ciphertext should not produce original plaintext"
+        );
+    }
 }

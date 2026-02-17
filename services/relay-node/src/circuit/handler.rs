@@ -255,3 +255,59 @@ impl NextHop {
         self.read.take()
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use common::crypto::SessionKey;
+
+    #[test]
+    fn test_circuit_context_new() {
+        let ctx = CircuitContext::new(42);
+        assert_eq!(ctx.circuit_id, 42);
+        assert_eq!(ctx.state, CircuitState::Initializing);
+        assert!(ctx.session_key.is_none());
+    }
+
+    #[test]
+    fn test_circuit_context_activate() {
+        let mut ctx = CircuitContext::new(1);
+        let key = SessionKey::new([1u8; 16], [2u8; 16]);
+        ctx.activate(key.clone());
+
+        assert_eq!(ctx.state, CircuitState::Active);
+        assert_eq!(ctx.session_key.unwrap(), key);
+    }
+
+    #[test]
+    fn test_circuit_context_close() {
+        let mut ctx = CircuitContext::new(1);
+        ctx.activate(SessionKey::new([1u8; 16], [2u8; 16]));
+        ctx.close();
+
+        assert_eq!(ctx.state, CircuitState::Closed);
+        assert!(ctx.session_key.is_none());
+    }
+
+    #[test]
+    fn test_circuit_registry_new_empty() {
+        let reg = CircuitRegistry::new();
+        assert_eq!(reg.circuit_count(), 0);
+    }
+
+    #[test]
+    fn test_circuit_registry_allocate_id() {
+        let mut reg = CircuitRegistry::new();
+        assert_eq!(reg.allocate_circuit_id(), 1);
+        assert_eq!(reg.allocate_circuit_id(), 2);
+        assert_eq!(reg.allocate_circuit_id(), 3);
+    }
+
+    #[test]
+    fn test_circuit_registry_default() {
+        let reg = CircuitRegistry::default();
+        assert_eq!(reg.circuit_count(), 0);
+        // Default should behave identically to new()
+    }
+}
