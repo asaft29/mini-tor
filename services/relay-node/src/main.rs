@@ -13,7 +13,7 @@ use keypair::KeyPair;
 use reqwest::Client;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncWriteExt, WriteHalf},
     net::TcpListener,
     signal,
     sync::Mutex,
@@ -213,6 +213,13 @@ async fn accept_connections(
 }
 
 /// Handle a single TCP connection
+///
+/// The client-facing TcpStream is split into read and write halves using
+/// `tokio::io::split()`. The read half is used directly in the main loop
+/// (no mutex needed), while the write half is wrapped in `Arc<Mutex<...>>`
+/// and shared with background tasks that send backward-direction messages.
+/// This prevents the deadlock where the main read loop would hold a mutex
+/// on the full stream while background writers wait to send responses.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     addr: SocketAddr,
@@ -222,12 +229,13 @@ async fn handle_connection(
 ) {
     info!("Handling connection from {}", addr);
 
-    let stream_arc = Arc::new(Mutex::new(stream));
+    // Split the client-facing stream: read half for the main loop,
+    // write half shared with background tasks for backward messages.
+    let (mut read_half, write_half) = tokio::io::split(stream);
+    let write_arc: Arc<Mutex<WriteHalf<tokio::net::TcpStream>>> = Arc::new(Mutex::new(write_half));
 
     loop {
-        let mut stream_guard = stream_arc.lock().await;
-        let msg_result = Message::from_stream(&mut *stream_guard).await;
-        drop(stream_guard);
+        let msg_result = Message::from_stream(&mut read_half).await;
 
         match msg_result {
             Ok(Some(msg)) => {
@@ -252,15 +260,15 @@ async fn handle_connection(
                             ),
                         };
 
-                        match handler.handle_message(msg, Some(stream_arc.clone())).await {
+                        match handler.handle_message(msg, Some(write_arc.clone())).await {
                             Ok(Some(response)) => {
                                 let bytes = response.to_bytes();
-                                let mut stream = stream_arc.lock().await;
-                                if let Err(e) = stream.write_all(&bytes).await {
+                                let mut writer = write_arc.lock().await;
+                                if let Err(e) = writer.write_all(&bytes).await {
                                     error!("Failed to send CREATED response: {}", e);
                                     break;
                                 }
-                                drop(stream);
+                                drop(writer);
                                 info!("Sent CREATED response for circuit {}", circuit_id);
 
                                 let mut registry = circuit_registry.lock().await;
@@ -282,23 +290,23 @@ async fn handle_connection(
                                 | common::protocol::MessageCommand::Extend
                         );
 
-                        match registry.handle_message(msg, Some(stream_arc.clone())).await {
+                        match registry.handle_message(msg, Some(write_arc.clone())).await {
                             Ok(Some(response)) => {
                                 let bytes = response.to_bytes();
-                                let mut stream = stream_arc.lock().await;
-                                if let Err(e) = stream.write_all(&bytes).await {
+                                let mut writer = write_arc.lock().await;
+                                if let Err(e) = writer.write_all(&bytes).await {
                                     error!("Failed to send response: {}", e);
-                                    drop(stream);
+                                    drop(writer);
                                     drop(registry);
                                     break;
                                 }
-                                drop(stream);
+                                drop(writer);
 
                                 if should_spawn_reader
                                     && let Some(handler) = registry.get_circuit_mut(circuit_id)
                                     && let Some(task_handle) = handler.spawn_nexthop_reader(
                                         circuit_registry.clone(),
-                                        stream_arc.clone(),
+                                        write_arc.clone(),
                                     )
                                 {
                                     info!("Spawned background reader for circuit {}", circuit_id);
@@ -315,7 +323,7 @@ async fn handle_connection(
                                     && let Some(handler) = registry.get_circuit_mut(circuit_id)
                                     && let Some(task_handle) = handler.spawn_nexthop_reader(
                                         circuit_registry.clone(),
-                                        stream_arc.clone(),
+                                        write_arc.clone(),
                                     )
                                 {
                                     info!("Spawned background reader for circuit {}", circuit_id);

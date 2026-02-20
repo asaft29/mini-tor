@@ -34,16 +34,18 @@ pub enum CircuitHandler {
 impl CircuitHandler {
     /// Handle an incoming message on this circuit
     /// Returns optional response message to send back
-    /// For exit nodes, prev_hop_stream must be provided for BEGIN and DATA messages
+    /// For exit nodes, prev_hop_write must be provided for BEGIN and DATA messages
     pub async fn handle_message(
         &mut self,
         msg: Message,
-        prev_hop_stream: Option<std::sync::Arc<tokio::sync::Mutex<tokio::net::TcpStream>>>,
+        prev_hop_write: Option<
+            std::sync::Arc<tokio::sync::Mutex<WriteHalf<tokio::net::TcpStream>>>,
+        >,
     ) -> anyhow::Result<Option<Message>> {
         match self {
             CircuitHandler::Entry(handler) => handler.handle_message(msg).await,
             CircuitHandler::Middle(handler) => handler.handle_message(msg).await,
-            CircuitHandler::Exit(handler) => handler.handle_message(msg, prev_hop_stream).await,
+            CircuitHandler::Exit(handler) => handler.handle_message(msg, prev_hop_write).await,
         }
     }
 
@@ -101,14 +103,14 @@ impl CircuitHandler {
     pub fn spawn_nexthop_reader(
         &mut self,
         circuit_registry: std::sync::Arc<tokio::sync::Mutex<CircuitRegistry>>,
-        client_stream: std::sync::Arc<tokio::sync::Mutex<TcpStream>>,
+        client_write: std::sync::Arc<tokio::sync::Mutex<WriteHalf<TcpStream>>>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         match self {
             CircuitHandler::Entry(handler) => {
-                handler.spawn_nexthop_reader(circuit_registry, client_stream)
+                handler.spawn_nexthop_reader(circuit_registry, client_write)
             }
             CircuitHandler::Middle(handler) => {
-                handler.spawn_nexthop_reader(circuit_registry, client_stream)
+                handler.spawn_nexthop_reader(circuit_registry, client_write)
             }
             CircuitHandler::Exit(_) => None,
         }
@@ -166,12 +168,14 @@ impl CircuitRegistry {
     pub async fn handle_message(
         &mut self,
         msg: Message,
-        prev_hop_stream: Option<std::sync::Arc<tokio::sync::Mutex<tokio::net::TcpStream>>>,
+        prev_hop_write: Option<
+            std::sync::Arc<tokio::sync::Mutex<WriteHalf<tokio::net::TcpStream>>>,
+        >,
     ) -> anyhow::Result<Option<Message>> {
         let circuit_id = msg.circuit_id;
 
         if let Some(handler) = self.get_circuit_mut(circuit_id) {
-            handler.handle_message(msg, prev_hop_stream).await
+            handler.handle_message(msg, prev_hop_write).await
         } else if msg.command == MessageCommand::Create {
             Ok(None)
         } else {

@@ -6,7 +6,7 @@ use common::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -78,7 +78,7 @@ impl ExitCircuitHandler {
     async fn handle_begin(
         &mut self,
         msg: Message,
-        prev_hop_stream: Arc<Mutex<TcpStream>>,
+        prev_hop_write: Arc<Mutex<WriteHalf<TcpStream>>>,
     ) -> anyhow::Result<Option<Message>> {
         info!(
             "Exit: Received BEGIN for circuit {} stream {}",
@@ -115,7 +115,7 @@ impl ExitCircuitHandler {
                     msg.stream_id,
                     destination_stream,
                     session_key.backward,
-                    prev_hop_stream,
+                    prev_hop_write,
                     dest_rx,
                 );
 
@@ -159,7 +159,7 @@ impl ExitCircuitHandler {
         stream_id: StreamId,
         destination_stream: TcpStream,
         backward_key: [u8; 16],
-        prev_hop_stream: Arc<Mutex<TcpStream>>,
+        prev_hop_write: Arc<Mutex<WriteHalf<TcpStream>>>,
         mut dest_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     ) -> tokio::task::JoinHandle<()> {
         let circuit_id = self.context.circuit_id;
@@ -180,8 +180,8 @@ impl ExitCircuitHandler {
                                 let end_msg = Message::end(circuit_id, stream_id, encrypted_data);
 
                                 let bytes = end_msg.to_bytes();
-                                let mut stream = prev_hop_stream.lock().await;
-                                let _ = stream.write_all(&bytes).await;
+                                let mut writer = prev_hop_write.lock().await;
+                                let _ = writer.write_all(&bytes).await;
                                 break;
                             }
                             Ok(n) => {
@@ -198,8 +198,8 @@ impl ExitCircuitHandler {
                                 let data_msg = Message::data(circuit_id, stream_id, encrypted);
 
                                 let bytes = data_msg.to_bytes();
-                                let mut stream = prev_hop_stream.lock().await;
-                                if let Err(e) = stream.write_all(&bytes).await {
+                                let mut writer = prev_hop_write.lock().await;
+                                if let Err(e) = writer.write_all(&bytes).await {
                                     error!("Exit: Failed to send backward message for circuit {} stream {}: {}", circuit_id, stream_id, e);
                                     break;
                                 }
@@ -217,8 +217,8 @@ impl ExitCircuitHandler {
                                 );
 
                                 let bytes = end_msg.to_bytes();
-                                let mut stream = prev_hop_stream.lock().await;
-                                let _ = stream.write_all(&bytes).await;
+                                let mut writer = prev_hop_write.lock().await;
+                                let _ = writer.write_all(&bytes).await;
                                 break;
                             }
                         }
@@ -333,14 +333,14 @@ impl ExitCircuitHandler {
     pub async fn handle_message(
         &mut self,
         msg: Message,
-        prev_hop_stream: Option<Arc<Mutex<TcpStream>>>,
+        prev_hop_write: Option<Arc<Mutex<WriteHalf<TcpStream>>>>,
     ) -> anyhow::Result<Option<Message>> {
         match msg.command {
             MessageCommand::Create => self.handle_create(msg).await,
             MessageCommand::Begin => {
-                let stream = prev_hop_stream
-                    .ok_or_else(|| anyhow::anyhow!("No prev_hop_stream for BEGIN"))?;
-                self.handle_begin(msg, stream).await
+                let writer =
+                    prev_hop_write.ok_or_else(|| anyhow::anyhow!("No prev_hop_write for BEGIN"))?;
+                self.handle_begin(msg, writer).await
             }
             MessageCommand::Data => self.handle_data(msg).await,
             MessageCommand::End => self.handle_end(msg).await,
@@ -515,14 +515,15 @@ mod tests {
         let mut handler = ExitCircuitHandler::new(100, keypair.clone());
         let (session_key, _) = setup_exit_handler(&mut handler).await;
 
-        // We need a prev_hop_stream for BEGIN
+        // We need a prev_hop write half for BEGIN
         let prev_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let prev_addr = prev_listener.local_addr().unwrap();
         let prev_connect =
             tokio::spawn(async move { TcpStream::connect(prev_addr).await.unwrap() });
         let (prev_server, _) = prev_listener.accept().await.unwrap();
         let _prev_client = prev_connect.await.unwrap();
-        let prev_hop = Arc::new(Mutex::new(prev_server));
+        let (_prev_read, prev_write) = tokio::io::split(prev_server);
+        let prev_hop_write = Arc::new(Mutex::new(prev_write));
 
         // Build BEGIN payload: "host:port\0" encrypted with forward key
         let dest_str = format!("{}\0", dest_addr);
@@ -530,7 +531,7 @@ mod tests {
         let begin_msg = Message::begin(100, 1, encrypted_dest);
 
         let response = handler
-            .handle_message(begin_msg, Some(prev_hop))
+            .handle_message(begin_msg, Some(prev_hop_write))
             .await
             .unwrap()
             .unwrap();
@@ -554,14 +555,15 @@ mod tests {
         let mut handler = ExitCircuitHandler::new(100, keypair.clone());
         let (session_key, _) = setup_exit_handler(&mut handler).await;
 
-        // prev_hop_stream
+        // prev_hop write half
         let prev_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let prev_addr = prev_listener.local_addr().unwrap();
         let prev_connect =
             tokio::spawn(async move { TcpStream::connect(prev_addr).await.unwrap() });
         let (prev_server, _) = prev_listener.accept().await.unwrap();
         let _prev_client = prev_connect.await.unwrap();
-        let prev_hop = Arc::new(Mutex::new(prev_server));
+        let (_prev_read, prev_write) = tokio::io::split(prev_server);
+        let prev_hop_write = Arc::new(Mutex::new(prev_write));
 
         // Try to connect to an address that should refuse connections
         let dest_str = "127.0.0.1:1\0"; // port 1 is very unlikely to be open
@@ -569,7 +571,7 @@ mod tests {
         let begin_msg = Message::begin(100, 2, encrypted_dest);
 
         let response = handler
-            .handle_message(begin_msg, Some(prev_hop))
+            .handle_message(begin_msg, Some(prev_hop_write))
             .await
             .unwrap()
             .unwrap();

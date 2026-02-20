@@ -5,7 +5,7 @@ use common::{
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
@@ -290,7 +290,7 @@ impl MiddleCircuitHandler {
     pub fn spawn_nexthop_reader(
         &mut self,
         circuit_registry: Arc<Mutex<crate::circuit::handler::CircuitRegistry>>,
-        prev_hop_stream: Arc<Mutex<TcpStream>>,
+        prev_hop_write: Arc<Mutex<WriteHalf<TcpStream>>>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let circuit_id = self.context.circuit_id;
 
@@ -323,8 +323,8 @@ impl MiddleCircuitHandler {
                         };
 
                         let bytes = response.to_bytes();
-                        let mut stream = prev_hop_stream.lock().await;
-                        if let Err(e) = stream.write_all(&bytes).await {
+                        let mut writer = prev_hop_write.lock().await;
+                        if let Err(e) = writer.write_all(&bytes).await {
                             error!(
                                 "Middle: Error sending backward message to previous hop: {}",
                                 e
