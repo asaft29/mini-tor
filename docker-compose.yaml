@@ -1,7 +1,173 @@
-include:
-  - services/discovery/docker-compose.yaml
-  - services/relay-node/docker-compose.yaml
+# docker-compose.yaml — Full onion routing demo
+#
+# Launches all 5 services on a shared Docker network:
+#   - discovery    (REST API on port 8080)
+#   - relay-entry  (entry node on port 9001)
+#   - relay-middle (middle node on port 9002)
+#   - relay-exit   (exit node on port 9003)
+#   - tor-client   (SOCKS5 proxy on port 1080)
+#
+# Usage:
+#   docker compose up --build          # build + start
+#   docker compose up --build -d       # detached
+#   docker compose down                # stop + remove
+#
+# Test:
+#   curl --socks5 localhost:1080 http://example.com
+#
+# Each relay node registers with its static IP address so other
+# containers (and the tor-client) can reach it via the Docker network.
+
+services:
+  # ---- Discovery Service ----
+  discovery:
+    build:
+      context: .
+      dockerfile: services/discovery/Dockerfile
+    container_name: tor-discovery
+    ports:
+      - "8080:8080"
+    volumes:
+      - discovery-data:/app/data
+    environment:
+      - RUST_LOG=discovery=info,tower_http=info
+      - CONSENSUS_PATH=/app/data/consensus.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      tor-network:
+        ipv4_address: 172.30.0.10
+
+  # ---- Entry Relay ----
+  relay-entry:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-entry
+    ports:
+      - "9001:9001"
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--node-type"
+      - "entry"
+      - "--port"
+      - "9001"
+      - "--host"
+      - "172.30.0.11"
+      - "--directory-url"
+      - "http://172.30.0.10:8080"
+      - "--heartbeat-interval"
+      - "30"
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      tor-network:
+        ipv4_address: 172.30.0.11
+
+  # ---- Middle Relay ----
+  relay-middle:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-middle
+    ports:
+      - "9002:9002"
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--node-type"
+      - "middle"
+      - "--port"
+      - "9002"
+      - "--host"
+      - "172.30.0.12"
+      - "--directory-url"
+      - "http://172.30.0.10:8080"
+      - "--heartbeat-interval"
+      - "30"
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      tor-network:
+        ipv4_address: 172.30.0.12
+
+  # ---- Exit Relay ----
+  relay-exit:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-exit
+    ports:
+      - "9003:9003"
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--node-type"
+      - "exit"
+      - "--port"
+      - "9003"
+      - "--host"
+      - "172.30.0.13"
+      - "--directory-url"
+      - "http://172.30.0.10:8080"
+      - "--heartbeat-interval"
+      - "30"
+      - "--exit-allow-all"
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      tor-network:
+        ipv4_address: 172.30.0.13
+
+  # ---- Tor Client (SOCKS5 Proxy) ----
+  tor-client:
+    build:
+      context: .
+      dockerfile: services/tor-client/Dockerfile
+    container_name: tor-client
+    ports:
+      - "1080:1080"
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--socks-addr"
+      - "0.0.0.0:1080"
+      - "--directory-url"
+      - "http://172.30.0.10:8080"
+      - "--pool-size"
+      - "3"
+    depends_on:
+      relay-entry:
+        condition: service_started
+      relay-middle:
+        condition: service_started
+      relay-exit:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      tor-network:
+        ipv4_address: 172.30.0.20
+
+volumes:
+  discovery-data:
+    driver: local
 
 networks:
   tor-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1

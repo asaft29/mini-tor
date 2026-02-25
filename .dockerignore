@@ -13,20 +13,22 @@ target/
 *.swo
 *~
 
-# Documentation
+# Documentation (not needed for build)
 doc/
-*.md
-README.md
 
-# Data files
-consensus.json
-*.json
+# Data files (runtime only)
+services/discovery/data/
 
-# Docker
-Dockerfile
-docker-compose.yml
-.dockerignore
+# Docker (don't include compose files in build context)
+docker-compose.yaml
+services/*/docker-compose.yaml
 
-# Misc
-.env
+# Logs
+logs/
 *.log
+
+# Scripts (not needed for build)
+scripts/
+
+# OpenCode config
+.opencode/
