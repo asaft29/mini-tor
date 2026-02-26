@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 /// Buffer size for reading data from the SOCKS5 client
 const SOCKS5_READ_BUF_SIZE: usize = 4096;
 
-/// Timeout for waiting for CONNECTED response from exit node
+/// Timeout for waiting for CONNECTED response (sent by exit node, relayed back through the circuit)
 const CONNECTED_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Handle a single SOCKS5 stream over an onion circuit
@@ -23,7 +23,8 @@ const CONNECTED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bridges a SOCKS5 client connection to a destination through the onion circuit:
 /// 1. Allocates a stream ID and registers a backward channel with the circuit
 /// 2. Sends a BEGIN message (onion-encrypted) to open the stream on the exit node
-/// 3. Waits for a CONNECTED response from the exit node (with timeout)
+/// 3. Waits for a CONNECTED response originating from the exit node, delivered
+///    via the circuit reader (entry node TCP connection → onion-decrypted → rx channel)
 /// 4. Sends a SOCKS5 success reply to the client
 /// 5. Relays data bidirectionally (SOCKS5 client <-> circuit) until the stream closes
 /// 6. Cleans up by sending END and unregistering the stream
@@ -60,7 +61,7 @@ pub async fn handle_stream(
     }
     debug!("Sent BEGIN for stream {} to {}", stream_id, destination);
 
-    // 3. Wait for CONNECTED response from exit node (with timeout)
+    // 3. Wait for CONNECTED response (sent by exit node, relayed back through the circuit)
     let connected_msg = match tokio::time::timeout(CONNECTED_TIMEOUT, rx.recv()).await {
         Ok(Some(msg)) => msg,
         Ok(None) => {
