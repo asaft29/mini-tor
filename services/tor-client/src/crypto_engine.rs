@@ -56,48 +56,6 @@ impl OnionKeys {
         // Layer 3: Decrypt exit's backward layer (innermost)
         aes_decrypt(&layer2, &self.exit.backward)
     }
-
-    /// Encrypt data for the EXTEND payload to the middle node
-    ///
-    /// Only one layer needed: entry.forward (entry peels it to see the EXTEND payload)
-    #[allow(dead_code)]
-    pub fn encrypt_for_extend_to_middle(&self, plaintext: &[u8]) -> Vec<u8> {
-        aes_encrypt(plaintext, &self.entry.forward)
-    }
-
-    /// Encrypt data for the EXTEND payload to the exit node
-    ///
-    /// Two layers needed: middle.forward, then entry.forward
-    /// Entry peels one layer, forwards to middle. Middle sees the EXTEND payload.
-    #[allow(dead_code)]
-    pub fn encrypt_for_extend_to_exit(&self, plaintext: &[u8]) -> Vec<u8> {
-        let layer2 = aes_encrypt(plaintext, &self.middle.forward);
-        aes_encrypt(&layer2, &self.entry.forward)
-    }
-
-    /// Decrypt an EXTENDED response from the middle node
-    ///
-    /// One layer: entry.backward (entry added its backward layer)
-    ///
-    /// # Errors
-    /// Returns an error if decryption fails
-    #[allow(dead_code)]
-    pub fn decrypt_extended_from_middle(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        aes_decrypt(ciphertext, &self.entry.backward)
-    }
-
-    /// Decrypt an EXTENDED response from the exit node
-    ///
-    /// Two layers: entry.backward first, then middle.backward
-    /// (entry adds its backward layer, middle adds its backward layer)
-    ///
-    /// # Errors
-    /// Returns an error if decryption fails
-    #[allow(dead_code)]
-    pub fn decrypt_extended_from_exit(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        let after_entry = aes_decrypt(ciphertext, &self.entry.backward)?;
-        aes_decrypt(&after_entry, &self.middle.backward)
-    }
 }
 
 #[cfg(test)]
@@ -189,32 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extend_to_middle_encrypt() {
-        let keys = test_keys();
-        let plaintext = b"extend payload for middle";
-
-        let encrypted = keys.encrypt_for_extend_to_middle(plaintext);
-
-        // Should be decryptable with entry's forward key
-        let decrypted = aes_decrypt(&encrypted, &keys.entry.forward).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
-    fn test_extend_to_exit_encrypt() {
-        let keys = test_keys();
-        let plaintext = b"extend payload for exit";
-
-        let encrypted = keys.encrypt_for_extend_to_exit(plaintext);
-
-        // Peel entry layer first
-        let after_entry = aes_decrypt(&encrypted, &keys.entry.forward).unwrap();
-        // Then peel middle layer
-        let decrypted = aes_decrypt(&after_entry, &keys.middle.forward).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
     fn test_simulated_relay_backward_path() {
         // Simulate what relays do in the backward direction:
         // Exit encrypts with exit.backward, middle encrypts with middle.backward,
@@ -231,33 +163,6 @@ mod tests {
 
         // Client peels all 3 layers
         let decrypted = keys.onion_decrypt(&after_entry).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
-    fn test_decrypt_extended_from_middle_roundtrip() {
-        let keys = test_keys();
-        let plaintext = b"EXTENDED response from middle";
-
-        // Entry node encrypts the EXTENDED response with its backward key
-        let encrypted = aes_encrypt(plaintext, &keys.entry.backward);
-
-        // Client decrypts
-        let decrypted = keys.decrypt_extended_from_middle(&encrypted).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
-    fn test_decrypt_extended_from_exit_roundtrip() {
-        let keys = test_keys();
-        let plaintext = b"EXTENDED response from exit";
-
-        // Middle encrypts with its backward key, then entry encrypts with its backward key
-        let after_middle = aes_encrypt(plaintext, &keys.middle.backward);
-        let after_entry = aes_encrypt(&after_middle, &keys.entry.backward);
-
-        // Client decrypts both layers
-        let decrypted = keys.decrypt_extended_from_exit(&after_entry).unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
