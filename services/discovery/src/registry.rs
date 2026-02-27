@@ -13,13 +13,13 @@ pub type AppState = Arc<tokio::sync::RwLock<NodeRegistry>>;
 /// Entry in the node registry with metadata
 #[derive(Debug, Clone)]
 pub struct NodeEntry {
-    pub descriptor: Arc<NodeDescriptor>,
+    pub descriptor: NodeDescriptor,
     pub registered_at: Instant,
     pub last_heartbeat: Instant,
 }
 
 impl NodeEntry {
-    fn new(d: Arc<NodeDescriptor>, reg: Instant, last: Instant) -> Self {
+    fn new(d: NodeDescriptor, reg: Instant, last: Instant) -> Self {
         Self {
             descriptor: d,
             registered_at: reg,
@@ -111,7 +111,7 @@ impl NodeRegistry {
         let now = Instant::now();
         for node in consensus.nodes.into_iter() {
             let node_id = node.node_id.clone();
-            let entry = NodeEntry::new(Arc::new(node), now, now);
+            let entry = NodeEntry::new(node, now, now);
             self.nodes.insert(node_id, entry);
         }
 
@@ -140,13 +140,13 @@ impl NodeRegistry {
 
         match self.nodes.contains_key(&node_id) {
             false => {
-                let entry = NodeEntry::new(Arc::new(descriptor), now, now);
+                let entry = NodeEntry::new(descriptor, now, now);
                 self.nodes.insert(node_id.clone(), entry);
                 tracing::info!("Registered new node: {}", node_id);
             }
             true => {
                 if let Some(entry) = self.nodes.get_mut(&node_id) {
-                    entry.descriptor = Arc::new(descriptor);
+                    entry.descriptor = descriptor;
                     entry.last_heartbeat = now;
                     tracing::info!("Updated node: {}", node_id);
                 }
@@ -158,16 +158,16 @@ impl NodeRegistry {
     pub fn get_all_nodes(&self) -> Vec<NodeDescriptor> {
         self.nodes
             .values()
-            .map(|entry| (*entry.descriptor).clone())
+            .map(|entry| entry.descriptor.clone())
             .collect()
     }
 
     /// Get nodes by type
-    pub fn get_nodes_by_type(&self, node_type: NodeType) -> Vec<Arc<NodeDescriptor>> {
+    pub(crate) fn get_nodes_by_type(&self, node_type: NodeType) -> Vec<NodeDescriptor> {
         self.nodes
             .values()
             .filter(|entry| entry.descriptor.node_type.eq(&node_type))
-            .map(|entry| Arc::clone(&entry.descriptor))
+            .map(|entry| entry.descriptor.clone())
             .collect()
     }
 
@@ -175,7 +175,7 @@ impl NodeRegistry {
     ///
     /// # Errors
     /// Returns `InsufficientNodes` if any node type (entry, middle, exit) is missing.
-    pub fn get_random_path(&self) -> Result<Vec<Arc<NodeDescriptor>>, RegistryError> {
+    pub fn get_random_path(&self) -> Result<Vec<NodeDescriptor>, RegistryError> {
         let entry_nodes = self.get_nodes_by_type(NodeType::Entry);
         let middle_nodes = self.get_nodes_by_type(NodeType::Middle);
         let exit_nodes = self.get_nodes_by_type(NodeType::Exit);
@@ -207,9 +207,9 @@ impl NodeRegistry {
     /// Select a node using weighted random selection based on bandwidth
     /// Nodes with higher bandwidth have proportionally higher chance of being selected
     fn select_weighted_node<R: Rng>(
-        nodes: &[Arc<NodeDescriptor>],
+        nodes: &[NodeDescriptor],
         rng: &mut R,
-    ) -> Result<Arc<NodeDescriptor>, RegistryError> {
+    ) -> Result<NodeDescriptor, RegistryError> {
         let first_node = nodes
             .first()
             .ok_or_else(|| RegistryError::InsufficientNodes("Empty node list".to_string()))?;
@@ -219,25 +219,25 @@ impl NodeRegistry {
         if total_bandwidth == 0 {
             let idx = rng.random_range(0..nodes.len());
             if let Some(node) = nodes.get(idx) {
-                return Ok(Arc::clone(node));
+                return Ok(node.clone());
             }
-            return Ok(Arc::clone(first_node));
+            return Ok(first_node.clone());
         }
 
         let mut random_weight = rng.random_range(0..total_bandwidth);
 
         for node in nodes {
             if random_weight < node.bandwidth {
-                return Ok(Arc::clone(node));
+                return Ok(node.clone());
             }
             random_weight -= node.bandwidth;
         }
 
         if let Some(last) = nodes.last() {
-            return Ok(Arc::clone(last));
+            return Ok(last.clone());
         }
 
-        Ok(Arc::clone(first_node))
+        Ok(first_node.clone())
     }
 
     /// Update node heartbeat

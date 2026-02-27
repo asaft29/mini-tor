@@ -93,8 +93,7 @@ pub async fn get_random_path(
     State(registry): State<AppState>,
 ) -> Result<Json<Vec<NodeDescriptor>>> {
     let registry = registry.read().await;
-    let path_arcs = registry.get_random_path()?;
-    let path: Vec<NodeDescriptor> = path_arcs.iter().map(|arc| (**arc).clone()).collect();
+    let path = registry.get_random_path()?;
 
     Ok(Json(path))
 }
