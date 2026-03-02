@@ -34,6 +34,10 @@ pub struct RelayConfig {
     /// Allow exit to all ports (only for exit nodes)
     #[arg(long, default_value = "false")]
     pub exit_allow_all: bool,
+
+    /// Enable TUI dashboard (disables stdout logging)
+    #[arg(long, default_value = "false")]
+    pub tui: bool,
 }
 
 impl RelayConfig {
@@ -108,6 +112,7 @@ mod tests {
             bandwidth: 1048576,
             heartbeat_interval: 60,
             exit_allow_all: false,
+            tui: false,
         };
 
         let addr = config.bind_addr().ok();
@@ -130,6 +135,7 @@ mod tests {
             bandwidth: 1048576,
             heartbeat_interval: 60,
             exit_allow_all: false,
+            tui: false,
         };
 
         let policy = config.exit_policy();
@@ -148,6 +154,7 @@ mod tests {
             bandwidth: 1048576,
             heartbeat_interval: 60,
             exit_allow_all: false,
+            tui: false,
         };
 
         assert!(config.exit_policy().is_none());

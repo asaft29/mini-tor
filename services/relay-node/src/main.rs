@@ -1,6 +1,8 @@
 mod circuit;
 mod config;
 mod keypair;
+mod metrics;
+mod tui;
 
 use anyhow::Result;
 use circuit::{
@@ -10,6 +12,7 @@ use clap::Parser;
 use common::{NodeDescriptor, protocol::Message};
 use config::RelayConfig;
 use keypair::KeyPair;
+use metrics::{EventKind, RelayMetrics};
 use reqwest::Client;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
@@ -24,14 +27,26 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
-
     let config = RelayConfig::parse();
+
+    // Set up tracing: when TUI is active, send logs to sink to avoid corrupting display
+    if config.tui {
+        use tracing_subscriber::fmt::writer::MakeWriterExt;
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .with_writer(std::io::sink.with_max_level(tracing::Level::TRACE))
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .init();
+    }
 
     info!("Starting relay node");
     info!("  Node type: {:?}", config.node_type);
@@ -64,6 +79,7 @@ async fn main() -> Result<()> {
     register_with_directory(&http_client, &config.directory_url, &descriptor).await?;
 
     let circuit_registry = Arc::new(Mutex::new(CircuitRegistry::new()));
+    let relay_metrics = RelayMetrics::new();
 
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Listening on {}", bind_addr);
@@ -77,22 +93,62 @@ async fn main() -> Result<()> {
 
     let connection_handle = tokio::spawn(accept_connections(
         listener,
-        circuit_registry,
+        circuit_registry.clone(),
         keypair,
         config.node_type,
+        relay_metrics.clone(),
     ));
 
     info!("Relay node started successfully. Press Ctrl+C to stop.");
 
-    tokio::select! {
-        _ = signal::ctrl_c() => {
-            info!("Received shutdown signal");
+    if config.tui {
+        let tui_metrics = relay_metrics.clone();
+        let tui_registry = circuit_registry.clone();
+        let tui_node_type = config.node_type;
+        let tui_addr = bind_addr.to_string();
+
+        let tui_handle = tokio::spawn(async move {
+            tui::run_tui(tui_metrics, tui_registry, tui_node_type, tui_addr).await
+        });
+
+        tokio::select! {
+            result = tui_handle => {
+                match result {
+                    Ok(Ok(true)) => {
+                        info!("TUI quit requested");
+                    }
+                    Ok(Ok(false)) => {
+                        info!("TUI exited");
+                    }
+                    Ok(Err(e)) => {
+                        error!("TUI error: {}", e);
+                    }
+                    Err(e) => {
+                        error!("TUI task panicked: {}", e);
+                    }
+                }
+            }
+            _ = signal::ctrl_c() => {
+                info!("Received shutdown signal");
+            }
+            result = heartbeat_handle => {
+                error!("Heartbeat task terminated unexpectedly: {:?}", result);
+            }
+            result = connection_handle => {
+                error!("Connection handler terminated unexpectedly: {:?}", result);
+            }
         }
-        result = heartbeat_handle => {
-            error!("Heartbeat task terminated unexpectedly: {:?}", result);
-        }
-        result = connection_handle => {
-            error!("Connection handler terminated unexpectedly: {:?}", result);
+    } else {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Received shutdown signal");
+            }
+            result = heartbeat_handle => {
+                error!("Heartbeat task terminated unexpectedly: {:?}", result);
+            }
+            result = connection_handle => {
+                error!("Connection handler terminated unexpectedly: {:?}", result);
+            }
         }
     }
 
@@ -195,15 +251,24 @@ async fn accept_connections(
     circuit_registry: Arc<Mutex<CircuitRegistry>>,
     keypair: KeyPair,
     node_type: common::NodeType,
+    metrics: Arc<RelayMetrics>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 info!("Accepted connection from {}", addr);
 
+                metrics
+                    .connections_accepted
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics.push_event(EventKind::ConnectionAccepted {
+                    peer: addr.to_string(),
+                });
+
                 let registry = circuit_registry.clone();
                 let kp = keypair.clone();
-                tokio::spawn(handle_connection(stream, addr, registry, kp, node_type));
+                let m = metrics.clone();
+                tokio::spawn(handle_connection(stream, addr, registry, kp, node_type, m));
             }
             Err(e) => {
                 error!("Failed to accept connection: {}", e);
@@ -226,6 +291,7 @@ async fn handle_connection(
     circuit_registry: Arc<Mutex<CircuitRegistry>>,
     keypair: KeyPair,
     node_type: common::NodeType,
+    metrics: Arc<RelayMetrics>,
 ) {
     info!("Handling connection from {}", addr);
 
@@ -249,15 +315,24 @@ async fn handle_connection(
                 match command {
                     common::protocol::MessageCommand::Create => {
                         let mut handler = match node_type {
-                            common::NodeType::Entry => CircuitHandler::Entry(
-                                EntryCircuitHandler::new(circuit_id, keypair.clone()),
-                            ),
-                            common::NodeType::Middle => CircuitHandler::Middle(
-                                MiddleCircuitHandler::new(circuit_id, keypair.clone()),
-                            ),
-                            common::NodeType::Exit => CircuitHandler::Exit(
-                                ExitCircuitHandler::new(circuit_id, keypair.clone()),
-                            ),
+                            common::NodeType::Entry => {
+                                let mut entry_handler =
+                                    EntryCircuitHandler::new(circuit_id, keypair.clone());
+                                entry_handler.set_metrics(metrics.clone());
+                                CircuitHandler::Entry(entry_handler)
+                            }
+                            common::NodeType::Middle => {
+                                let mut middle_handler =
+                                    MiddleCircuitHandler::new(circuit_id, keypair.clone());
+                                middle_handler.set_metrics(metrics.clone());
+                                CircuitHandler::Middle(middle_handler)
+                            }
+                            common::NodeType::Exit => {
+                                let mut exit_handler =
+                                    ExitCircuitHandler::new(circuit_id, keypair.clone());
+                                exit_handler.set_metrics(metrics.clone());
+                                CircuitHandler::Exit(exit_handler)
+                            }
                         };
 
                         match handler.handle_message(msg, Some(write_arc.clone())).await {
@@ -271,12 +346,20 @@ async fn handle_connection(
                                 drop(writer);
                                 info!("Sent CREATED response for circuit {}", circuit_id);
 
+                                metrics
+                                    .circuits_created
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                metrics.push_event(EventKind::CircuitCreated { circuit_id });
+
                                 let mut registry = circuit_registry.lock().await;
                                 registry.add_circuit(circuit_id, handler);
                             }
                             Ok(None) => {}
                             Err(e) => {
                                 error!("Failed to handle CREATE: {}", e);
+                                metrics.push_event(EventKind::Error {
+                                    message: format!("CREATE failed cid={circuit_id}: {e}"),
+                                });
                                 break;
                             }
                         }
@@ -292,6 +375,7 @@ async fn handle_connection(
 
                         match registry.handle_message(msg, Some(write_arc.clone())).await {
                             Ok(Some(response)) => {
+                                let resp_bytes = response.data.len();
                                 let bytes = response.to_bytes();
                                 let mut writer = write_arc.lock().await;
                                 if let Err(e) = writer.write_all(&bytes).await {
@@ -302,11 +386,37 @@ async fn handle_connection(
                                 }
                                 drop(writer);
 
+                                // Push forward relay event for non-circuit-management commands
+                                if !matches!(
+                                    command,
+                                    common::protocol::MessageCommand::Extended
+                                        | common::protocol::MessageCommand::Extend
+                                        | common::protocol::MessageCommand::Destroy
+                                ) {
+                                    metrics.bytes_forwarded.fetch_add(
+                                        resp_bytes as u64,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    metrics.push_event(EventKind::RelayForward {
+                                        circuit_id,
+                                        command,
+                                        bytes: resp_bytes,
+                                    });
+                                }
+
+                                if matches!(command, common::protocol::MessageCommand::Destroy) {
+                                    metrics
+                                        .circuits_destroyed
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    metrics.push_event(EventKind::CircuitDestroyed { circuit_id });
+                                }
+
                                 if should_spawn_reader
                                     && let Some(handler) = registry.get_circuit_mut(circuit_id)
                                     && let Some(task_handle) = handler.spawn_nexthop_reader(
                                         circuit_registry.clone(),
                                         write_arc.clone(),
+                                        metrics.clone(),
                                     )
                                 {
                                     info!("Spawned background reader for circuit {}", circuit_id);
@@ -319,11 +429,20 @@ async fn handle_connection(
                                 }
                             }
                             Ok(None) => {
+                                // EXTEND that returns None still needs relay event
+                                if matches!(command, common::protocol::MessageCommand::Destroy) {
+                                    metrics
+                                        .circuits_destroyed
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    metrics.push_event(EventKind::CircuitDestroyed { circuit_id });
+                                }
+
                                 if should_spawn_reader
                                     && let Some(handler) = registry.get_circuit_mut(circuit_id)
                                     && let Some(task_handle) = handler.spawn_nexthop_reader(
                                         circuit_registry.clone(),
                                         write_arc.clone(),
+                                        metrics.clone(),
                                     )
                                 {
                                     info!("Spawned background reader for circuit {}", circuit_id);
@@ -337,6 +456,9 @@ async fn handle_connection(
                             }
                             Err(e) => {
                                 error!("Failed to handle message: {}", e);
+                                metrics.push_event(EventKind::Error {
+                                    message: format!("{command} failed cid={circuit_id}: {e}"),
+                                });
                                 drop(registry);
                                 break;
                             }
@@ -347,10 +469,16 @@ async fn handle_connection(
             }
             Ok(None) => {
                 info!("Connection from {} closed", addr);
+                metrics.push_event(EventKind::ConnectionClosed {
+                    peer: addr.to_string(),
+                });
                 break;
             }
             Err(e) => {
                 error!("Error reading message from {}: {}", addr, e);
+                metrics.push_event(EventKind::ConnectionClosed {
+                    peer: addr.to_string(),
+                });
                 break;
             }
         }

@@ -22,9 +22,12 @@ use tower::ServiceExt;
 
 /// Build a fresh `AppState` (empty registry) with a throwaway consensus path.
 fn fresh_state() -> AppState {
-    Arc::new(RwLock::new(NodeRegistry::new(PathBuf::from(
-        "/tmp/discovery-integration-test.json",
-    ))))
+    AppState {
+        registry: Arc::new(RwLock::new(NodeRegistry::new(PathBuf::from(
+            "/tmp/discovery-integration-test.json",
+        )))),
+        metrics: None,
+    }
 }
 
 /// Create a minimal `NodeDescriptor` for testing.

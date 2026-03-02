@@ -6,9 +6,11 @@ use axum::{
 };
 use common::NodeDescriptor;
 use serde::Serialize;
+use std::sync::atomic::Ordering;
 use utoipa::ToSchema;
 
 use crate::error::Result;
+use crate::metrics::EventKind;
 use crate::registry::{AppState, RegistryStats};
 
 /// Response for list nodes endpoint
@@ -36,7 +38,7 @@ pub struct NodesResponse {
     tag = "nodes"
 )]
 pub async fn register_node(
-    State(registry): State<AppState>,
+    State(state): State<AppState>,
     Json(descriptor): Json<NodeDescriptor>,
 ) -> Result<impl IntoResponse> {
     if descriptor.node_id.is_empty() {
@@ -50,8 +52,21 @@ pub async fn register_node(
         ));
     }
 
-    let mut registry = registry.write().await;
+    let node_id = descriptor.node_id.clone();
+    let node_type = format!("{}", descriptor.node_type);
+    let address = descriptor.address.to_string();
+
+    let mut registry = state.registry.write().await;
     registry.register_node(descriptor);
+
+    if let Some(m) = &state.metrics {
+        m.registrations.fetch_add(1, Ordering::Relaxed);
+        m.push_event(EventKind::NodeRegistered {
+            node_id,
+            node_type,
+            address,
+        });
+    }
 
     Ok((StatusCode::CREATED, "Node registered successfully"))
 }
@@ -68,8 +83,8 @@ pub async fn register_node(
     ),
     tag = "nodes"
 )]
-pub async fn get_all_nodes(State(registry): State<AppState>) -> Result<Json<NodesResponse>> {
-    let registry = registry.read().await;
+pub async fn get_all_nodes(State(state): State<AppState>) -> Result<Json<NodesResponse>> {
+    let registry = state.registry.read().await;
     let nodes = registry.get_all_nodes();
     let count = nodes.len();
 
@@ -89,11 +104,14 @@ pub async fn get_all_nodes(State(registry): State<AppState>) -> Result<Json<Node
     ),
     tag = "nodes"
 )]
-pub async fn get_random_path(
-    State(registry): State<AppState>,
-) -> Result<Json<Vec<NodeDescriptor>>> {
-    let registry = registry.read().await;
+pub async fn get_random_path(State(state): State<AppState>) -> Result<Json<Vec<NodeDescriptor>>> {
+    let registry = state.registry.read().await;
     let path = registry.get_random_path()?;
+
+    if let Some(m) = &state.metrics {
+        m.path_requests.fetch_add(1, Ordering::Relaxed);
+        m.push_event(EventKind::PathRequested);
+    }
 
     Ok(Json(path))
 }
@@ -115,11 +133,18 @@ pub async fn get_random_path(
     tag = "nodes"
 )]
 pub async fn update_heartbeat(
-    State(registry): State<AppState>,
+    State(state): State<AppState>,
     Path(node_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let mut registry = registry.write().await;
+    let mut registry = state.registry.write().await;
     registry.update_heartbeat(&node_id)?;
+
+    if let Some(m) = &state.metrics {
+        m.heartbeats.fetch_add(1, Ordering::Relaxed);
+        m.push_event(EventKind::Heartbeat {
+            node_id: node_id.clone(),
+        });
+    }
 
     Ok(StatusCode::OK)
 }
@@ -141,11 +166,18 @@ pub async fn update_heartbeat(
     tag = "nodes"
 )]
 pub async fn remove_node(
-    State(registry): State<AppState>,
+    State(state): State<AppState>,
     Path(node_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let mut registry = registry.write().await;
+    let mut registry = state.registry.write().await;
     registry.remove_node(&node_id)?;
+
+    if let Some(m) = &state.metrics {
+        m.removals.fetch_add(1, Ordering::Relaxed);
+        m.push_event(EventKind::NodeRemoved {
+            node_id: node_id.clone(),
+        });
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -162,9 +194,13 @@ pub async fn remove_node(
     ),
     tag = "stats"
 )]
-pub async fn get_stats(State(registry): State<AppState>) -> Result<Json<RegistryStats>> {
-    let registry = registry.read().await;
+pub async fn get_stats(State(state): State<AppState>) -> Result<Json<RegistryStats>> {
+    let registry = state.registry.read().await;
     let stats = registry.get_stats();
+
+    if let Some(m) = &state.metrics {
+        m.push_event(EventKind::StatsQueried);
+    }
 
     Ok(Json(stats))
 }
@@ -189,9 +225,13 @@ pub struct HealthResponse {
     ),
     tag = "health"
 )]
-pub async fn health_check(State(registry): State<AppState>) -> impl IntoResponse {
-    let registry = registry.read().await;
+pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    let registry = state.registry.read().await;
     let ready = registry.is_ready();
+
+    if let Some(m) = &state.metrics {
+        m.push_event(EventKind::HealthCheck { ready });
+    }
 
     let response = HealthResponse {
         status: "ok".to_string(),
@@ -221,8 +261,8 @@ pub async fn health_check(State(registry): State<AppState>) -> impl IntoResponse
     ),
     tag = "health"
 )]
-pub async fn readiness_check(State(registry): State<AppState>) -> Result<impl IntoResponse> {
-    let registry = registry.read().await;
+pub async fn readiness_check(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let registry = state.registry.read().await;
 
     if registry.is_ready() {
         Ok((StatusCode::OK, "Ready"))

@@ -1,7 +1,9 @@
 use crate::circuit::handler::{CircuitContext, CircuitState};
 use crate::keypair::KeyPair;
+use crate::metrics::{EventKind, RelayMetrics};
 use common::{
     crypto::{SessionKey, aes_decrypt, aes_encrypt, derive_session_key},
+    metrics::Direction,
     protocol::{CircuitId, Message, MessageCommand, StreamId},
 };
 use std::collections::HashMap;
@@ -29,6 +31,8 @@ pub struct ExitCircuitHandler {
     keypair: KeyPair,
     /// Map of stream IDs to stream state
     streams: HashMap<StreamId, ExitStream>,
+    /// Metrics for TUI events (optional — None in tests)
+    metrics: Option<Arc<RelayMetrics>>,
 }
 
 impl ExitCircuitHandler {
@@ -38,7 +42,13 @@ impl ExitCircuitHandler {
             context: CircuitContext::new(circuit_id),
             keypair,
             streams: HashMap::new(),
+            metrics: None,
         }
+    }
+
+    /// Set the metrics reference for TUI event reporting
+    pub fn set_metrics(&mut self, metrics: Arc<RelayMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     /// Handle CREATE message (establishing circuit with middle node)
@@ -119,14 +129,25 @@ impl ExitCircuitHandler {
                     dest_rx,
                 );
 
+                let dest_string = dest_str.to_string();
                 self.streams.insert(
                     msg.stream_id,
                     ExitStream {
-                        destination: dest_str.to_string(),
+                        destination: dest_string.clone(),
                         dest_tx,
                         _task_handle: task_handle,
                     },
                 );
+
+                if let Some(m) = &self.metrics {
+                    m.streams_opened
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    m.push_event(EventKind::StreamOpened {
+                        circuit_id: self.context.circuit_id,
+                        stream_id: msg.stream_id,
+                        destination: dest_string,
+                    });
+                }
 
                 // Encrypt CONNECTED response with backward key
                 let connected_msg = Message::connected(self.context.circuit_id, msg.stream_id);
@@ -163,6 +184,7 @@ impl ExitCircuitHandler {
         mut dest_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     ) -> tokio::task::JoinHandle<()> {
         let circuit_id = self.context.circuit_id;
+        let metrics = self.metrics.clone();
 
         let (mut read_half, mut write_half) = tokio::io::split(destination_stream);
 
@@ -182,6 +204,13 @@ impl ExitCircuitHandler {
                                 let bytes = end_msg.to_bytes();
                                 let mut writer = prev_hop_write.lock().await;
                                 let _ = writer.write_all(&bytes).await;
+
+                                if let Some(m) = &metrics {
+                                    m.push_event(EventKind::StreamClosed {
+                                        circuit_id,
+                                        stream_id,
+                                    });
+                                }
                                 break;
                             }
                             Ok(n) => {
@@ -204,6 +233,19 @@ impl ExitCircuitHandler {
                                     break;
                                 }
                                 debug!("Exit: Sent {} encrypted bytes back to middle node", encrypted_len);
+
+                                if let Some(m) = &metrics {
+                                    m.bytes_received.fetch_add(
+                                        n as u64,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    m.push_event(EventKind::StreamData {
+                                        circuit_id,
+                                        stream_id,
+                                        bytes: n,
+                                        direction: Direction::Backward,
+                                    });
+                                }
                             }
                             Err(e) => {
                                 error!("Exit: Error reading from destination for circuit {} stream {}: {}", circuit_id, stream_id, e);
@@ -276,11 +318,22 @@ impl ExitCircuitHandler {
                     encrypted_data,
                 )));
             }
+            let data_len = decrypted.len();
             debug!(
                 "Exit: Queued {} bytes to destination {}",
-                decrypted.len(),
-                exit_stream.destination
+                data_len, exit_stream.destination
             );
+
+            if let Some(m) = &self.metrics {
+                m.bytes_forwarded
+                    .fetch_add(data_len as u64, std::sync::atomic::Ordering::Relaxed);
+                m.push_event(EventKind::StreamData {
+                    circuit_id: self.context.circuit_id,
+                    stream_id: msg.stream_id,
+                    bytes: data_len,
+                    direction: Direction::Forward,
+                });
+            }
 
             Ok(None)
         } else {
@@ -312,6 +365,13 @@ impl ExitCircuitHandler {
                 "Exit: No stream {} to close for circuit {}",
                 msg.stream_id, self.context.circuit_id
             );
+        }
+
+        if let Some(m) = &self.metrics {
+            m.push_event(EventKind::StreamClosed {
+                circuit_id: self.context.circuit_id,
+                stream_id: msg.stream_id,
+            });
         }
 
         let session_key = self

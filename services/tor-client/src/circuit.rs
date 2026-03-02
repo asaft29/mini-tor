@@ -1,7 +1,9 @@
 use crate::crypto_engine::OnionKeys;
 use crate::directory_client::DirectoryClient;
+use crate::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
 use common::crypto::{EphemeralKeyPair, SessionKey, aes_decrypt, aes_encrypt, derive_session_key};
+use common::metrics::Direction;
 use common::{CircuitId, Message, MessageCommand, NodeDescriptor, StreamId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,6 +48,8 @@ pub struct Circuit {
     pub stream_senders: HashMap<StreamId, mpsc::UnboundedSender<Message>>,
     /// Next stream ID to allocate
     next_stream_id: StreamId,
+    /// Human-readable path for TUI display (e.g. ":9001 → :9002 → :9003")
+    pub path_display: Option<String>,
 }
 
 impl Circuit {
@@ -202,6 +206,14 @@ impl CircuitBuilder {
 
         let onion_keys = OnionKeys::new(entry_key, middle_key, exit_key);
 
+        // Build human-readable path string for TUI display
+        let path_display = Some(format!(
+            ":{} \u{2192} :{} \u{2192} :{}",
+            entry.address.port(),
+            middle.address.port(),
+            exit.address.port()
+        ));
+
         // Split the TCP stream into read and write halves
         // The write half stays in Circuit for send_message()
         // The read half is returned for spawn_circuit_reader()
@@ -214,6 +226,7 @@ impl CircuitBuilder {
             onion_keys,
             stream_senders: HashMap::new(),
             next_stream_id: 1,
+            path_display,
         };
 
         Ok(BuiltCircuit { circuit, read_half })
@@ -443,6 +456,7 @@ pub struct CircuitPool {
     next_circuit_id: CircuitId,
     directory_client: DirectoryClient,
     pool_size: usize,
+    metrics: Option<Arc<ClientMetrics>>,
 }
 
 impl CircuitPool {
@@ -453,7 +467,18 @@ impl CircuitPool {
             next_circuit_id: 1,
             directory_client,
             pool_size,
+            metrics: None,
         }
+    }
+
+    /// Attach metrics to this pool (call before `initialize()`)
+    pub fn set_metrics(&mut self, metrics: Arc<ClientMetrics>) {
+        self.metrics = Some(metrics);
+    }
+
+    /// Get a reference to the metrics (if set)
+    pub fn metrics(&self) -> Option<&Arc<ClientMetrics>> {
+        self.metrics.as_ref()
     }
 
     /// Pre-build circuits to fill the pool at startup
@@ -561,6 +586,18 @@ impl CircuitPool {
             .circuits
             .get(&circuit_id)
             .ok_or_else(|| anyhow::anyhow!("Newly built circuit {} not found", circuit_id))?;
+
+        // Push replacement event
+        if let Some(ref metrics) = self.metrics {
+            metrics
+                .circuits_replaced
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.push_event(EventKind::CircuitReplaced {
+                old_id: failed_id,
+                new_id: circuit_id,
+            });
+        }
+
         Ok((Arc::clone(circuit), read_half))
     }
 
@@ -577,8 +614,22 @@ impl CircuitPool {
 
         let built = CircuitBuilder::build(circuit_id, &path).await?;
 
+        // Capture path display before moving circuit into Arc<Mutex>
+        let path_display = built.circuit.path_display.clone().unwrap_or_default();
+
         self.circuits
             .insert(circuit_id, Arc::new(Mutex::new(built.circuit)));
+
+        // Push metrics event
+        if let Some(ref metrics) = self.metrics {
+            metrics
+                .circuits_built
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.push_event(EventKind::CircuitBuilt {
+                circuit_id,
+                path: path_display,
+            });
+        }
 
         Ok((circuit_id, built.read_half))
     }
@@ -594,6 +645,13 @@ impl CircuitPool {
     #[allow(dead_code)]
     pub fn circuit_count(&self) -> usize {
         self.circuits.len()
+    }
+
+    /// Iterate over all circuits in the pool (for TUI display)
+    pub fn iter_circuits(
+        &self,
+    ) -> std::collections::hash_map::Iter<'_, CircuitId, Arc<Mutex<Circuit>>> {
+        self.circuits.iter()
     }
 }
 
@@ -611,6 +669,7 @@ impl CircuitPool {
 pub fn spawn_circuit_reader(
     circuit: Arc<Mutex<Circuit>>,
     mut read_half: ReadHalf<TcpStream>,
+    metrics: Arc<ClientMetrics>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let circuit_id = circuit.lock().await.circuit_id;
@@ -624,6 +683,7 @@ pub fn spawn_circuit_reader(
                     info!("Entry node closed connection for circuit {}", circuit_id);
                     let mut circuit_guard = circuit.lock().await;
                     circuit_guard.state = CircuitState::Closed;
+                    metrics.push_event(EventKind::CircuitClosed { circuit_id });
                     break;
                 }
                 Err(e) => {
@@ -633,6 +693,7 @@ pub fn spawn_circuit_reader(
                     );
                     let mut circuit_guard = circuit.lock().await;
                     circuit_guard.state = CircuitState::Closed;
+                    metrics.push_event(EventKind::CircuitClosed { circuit_id });
                     break;
                 }
             };
@@ -656,6 +717,21 @@ pub fn spawn_circuit_reader(
                     continue;
                 }
             };
+
+            let data_len = decrypted_data.len();
+
+            // Track backward data for DATA messages
+            if msg.command == MessageCommand::Data {
+                metrics
+                    .bytes_received
+                    .fetch_add(data_len as u64, std::sync::atomic::Ordering::Relaxed);
+                metrics.push_event(EventKind::StreamData {
+                    circuit_id,
+                    stream_id: msg.stream_id,
+                    bytes: data_len,
+                    direction: Direction::Backward,
+                });
+            }
 
             // Create decrypted message and route to the correct stream
             let decrypted_msg =

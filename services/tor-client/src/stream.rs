@@ -1,6 +1,8 @@
 use crate::circuit::Circuit;
+use crate::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
 use common::MessageCommand;
+use common::metrics::Direction;
 use simple_socks5::conn::reply::Rep;
 use simple_socks5::parse::AddrPort;
 use simple_socks5::{ATYP, Socks5};
@@ -35,6 +37,7 @@ pub async fn handle_stream(
     circuit: Arc<Mutex<Circuit>>,
     socks_stream: &mut TcpStream,
     destination: String,
+    metrics: Arc<ClientMetrics>,
 ) -> Result<()> {
     // 1. Allocate stream ID and register backward channel
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -60,6 +63,12 @@ pub async fn handle_stream(
             .context("Failed to send BEGIN message")?;
     }
     debug!("Sent BEGIN for stream {} to {}", stream_id, destination);
+
+    metrics.push_event(EventKind::StreamBegin {
+        circuit_id,
+        stream_id,
+        destination: destination.clone(),
+    });
 
     // 3. Wait for CONNECTED response (sent by exit node, relayed back through the circuit)
     let connected_msg = match tokio::time::timeout(CONNECTED_TIMEOUT, rx.recv()).await {
@@ -105,6 +114,11 @@ pub async fn handle_stream(
         stream_id, destination, circuit_id
     );
 
+    metrics.push_event(EventKind::StreamConnected {
+        circuit_id,
+        stream_id,
+    });
+
     // 4. Send SOCKS5 success reply to client
     Socks5::send_conn_reply(
         socks_stream,
@@ -136,6 +150,13 @@ pub async fn handle_stream(
                             error!("Failed to send DATA on stream {}: {}", stream_id, e);
                             break;
                         }
+                        metrics.bytes_sent.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                        metrics.push_event(EventKind::StreamData {
+                            circuit_id,
+                            stream_id,
+                            bytes: n,
+                            direction: Direction::Forward,
+                        });
                     }
                     Err(e) => {
                         warn!("Error reading from SOCKS5 client on stream {}: {}", stream_id, e);
@@ -175,6 +196,10 @@ pub async fn handle_stream(
 
     // 6. Cleanup: send END and unregister stream
     cleanup_stream(&circuit, socks_stream, stream_id).await;
+    metrics.push_event(EventKind::StreamEnd {
+        circuit_id,
+        stream_id,
+    });
     info!("Stream {} on circuit {} closed", stream_id, circuit_id);
 
     Ok(())

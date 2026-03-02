@@ -10,22 +10,35 @@ use tokio::sync::Mutex;
 use tor_client::circuit::{CircuitPool, CircuitState, spawn_circuit_reader};
 use tor_client::config::TorClientConfig;
 use tor_client::directory_client::DirectoryClient;
+use tor_client::metrics::{ClientMetrics, EventKind};
 use tor_client::stream::handle_stream;
 use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     let config = TorClientConfig::parse();
+
+    // Conditional tracing: when TUI is active, suppress stdout output
+    if config.tui {
+        // Send tracing output to sink so it doesn't corrupt the TUI
+        tracing_subscriber::fmt().with_writer(std::io::sink).init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
+
     info!(
         "Starting Tor client: socks_addr={}, directory_url={}, pool_size={}",
         config.socks_addr, config.directory_url, config.pool_size
     );
 
+    // Create shared metrics
+    let metrics = ClientMetrics::new();
+
     // Create directory client and circuit pool
     let directory_client = DirectoryClient::new(config.directory_url.clone());
     let mut pool = CircuitPool::new(directory_client, config.pool_size);
+    pool.set_metrics(Arc::clone(&metrics));
+
     let built_circuits = pool
         .initialize()
         .await
@@ -33,7 +46,7 @@ async fn main() -> Result<()> {
 
     // Spawn background readers for each pre-built circuit
     for (circuit, read_half) in built_circuits {
-        spawn_circuit_reader(circuit, read_half);
+        spawn_circuit_reader(circuit, read_half, Arc::clone(&metrics));
     }
 
     let pool = Arc::new(Mutex::new(pool));
@@ -47,6 +60,18 @@ async fn main() -> Result<()> {
 
     info!("SOCKS5 server listening on {}", config.socks_addr);
 
+    // Optionally spawn TUI task
+    let tui_handle = if config.tui {
+        let tui_metrics = Arc::clone(&metrics);
+        let tui_pool = Arc::clone(&pool);
+        let tui_socks_addr = config.socks_addr.clone();
+        Some(tokio::spawn(async move {
+            tor_client::tui::run_tui(tui_metrics, tui_pool, tui_socks_addr).await
+        }))
+    } else {
+        None
+    };
+
     // Accept loop with graceful shutdown
     loop {
         tokio::select! {
@@ -55,27 +80,48 @@ async fn main() -> Result<()> {
                     Ok(conn) => conn,
                     Err(e) => {
                         error!("Failed to accept SOCKS5 connection: {}", e);
+                        metrics.push_event(EventKind::Error {
+                            message: format!("Accept failed: {e}"),
+                        });
                         continue;
                     }
                 };
 
                 info!("Accepted SOCKS5 connection from {}", addr);
+                metrics
+                    .connections_accepted
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 let server = Arc::clone(&server);
                 let pool = Arc::clone(&pool);
+                let metrics = Arc::clone(&metrics);
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(&server, &pool, &mut stream, addr).await {
+                    if let Err(e) = handle_connection(&server, &pool, &mut stream, addr, &metrics).await {
                         warn!("SOCKS5 connection from {} failed: {:#}", addr, e);
+                        metrics.push_event(EventKind::Error {
+                            message: format!("Connection from {addr} failed: {e:#}"),
+                        });
                     }
                 });
             }
 
-            _ = tokio::signal::ctrl_c() => {
+            // If TUI is running, also wait for it to exit (user pressed q)
+            result = tokio::signal::ctrl_c() => {
+                if let Err(e) = result {
+                    error!("Failed to listen for Ctrl+C: {}", e);
+                }
                 info!("Received Ctrl+C, shutting down");
                 break;
             }
         }
+    }
+
+    // If TUI was running, wait for it to finish cleanup
+    if let Some(handle) = tui_handle {
+        // The TUI should exit on its own when it detects shutdown,
+        // or it may already have exited if user pressed 'q'
+        let _ = handle.await;
     }
 
     info!("Tor client shut down");
@@ -94,6 +140,7 @@ async fn handle_connection(
     pool: &Arc<Mutex<CircuitPool>>,
     stream: &mut tokio::net::TcpStream,
     addr: std::net::SocketAddr,
+    metrics: &Arc<ClientMetrics>,
 ) -> Result<()> {
     // SOCKS5 authentication handshake (borrows stream)
     server
@@ -122,6 +169,11 @@ async fn handle_connection(
     let destination = req.dst.to_string();
     info!("SOCKS5 CONNECT from {} to {}", addr, destination);
 
+    metrics.push_event(EventKind::Socks5Accept {
+        addr,
+        destination: destination.clone(),
+    });
+
     // Select least-loaded circuit (may build a new one if pool is exhausted)
     let (circuit, maybe_read_half) = {
         let mut p = pool.lock().await;
@@ -132,13 +184,19 @@ async fn handle_connection(
 
     // If a new circuit was built, spawn a reader for it (fixes Bug #3)
     if let Some(read_half) = maybe_read_half {
-        spawn_circuit_reader(Arc::clone(&circuit), read_half);
+        spawn_circuit_reader(Arc::clone(&circuit), read_half, Arc::clone(metrics));
     }
 
     // Route through onion circuit
     // handle_stream sends BEGIN, waits for CONNECTED, sends SOCKS5 reply,
     // and relays data bidirectionally
-    let result = handle_stream(Arc::clone(&circuit), stream, destination).await;
+    let result = handle_stream(
+        Arc::clone(&circuit),
+        stream,
+        destination,
+        Arc::clone(metrics),
+    )
+    .await;
 
     // If the stream failed, check if the circuit is dead and replace it
     if result.is_err() {
@@ -151,11 +209,14 @@ async fn handle_connection(
             let mut p = pool.lock().await;
             match p.replace_circuit(failed_id).await {
                 Ok((new_circuit, read_half)) => {
-                    spawn_circuit_reader(new_circuit, read_half);
+                    spawn_circuit_reader(new_circuit, read_half, Arc::clone(metrics));
                     info!("Successfully replaced failed circuit {}", failed_id);
                 }
                 Err(e) => {
                     error!("Failed to replace circuit {}: {}", failed_id, e);
+                    metrics.push_event(EventKind::Error {
+                        message: format!("Circuit replacement failed: {e}"),
+                    });
                 }
             }
         }

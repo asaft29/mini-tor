@@ -1,11 +1,13 @@
 use crate::circuit::entry::EntryCircuitHandler;
 use crate::circuit::exit::ExitCircuitHandler;
 use crate::circuit::middle::MiddleCircuitHandler;
+use crate::metrics::RelayMetrics;
 use common::{
     crypto::SessionKey,
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
@@ -104,13 +106,14 @@ impl CircuitHandler {
         &mut self,
         circuit_registry: std::sync::Arc<tokio::sync::Mutex<CircuitRegistry>>,
         client_write: std::sync::Arc<tokio::sync::Mutex<WriteHalf<TcpStream>>>,
+        metrics: Arc<RelayMetrics>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         match self {
             CircuitHandler::Entry(handler) => {
-                handler.spawn_nexthop_reader(circuit_registry, client_write)
+                handler.spawn_nexthop_reader(circuit_registry, client_write, metrics)
             }
             CircuitHandler::Middle(handler) => {
-                handler.spawn_nexthop_reader(circuit_registry, client_write)
+                handler.spawn_nexthop_reader(circuit_registry, client_write, metrics)
             }
             CircuitHandler::Exit(_) => None,
         }

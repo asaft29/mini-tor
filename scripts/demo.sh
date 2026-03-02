@@ -24,16 +24,20 @@ RUST_LOG="${RUST_LOG:-info}"
 # ---------------------------------------------------
 
 SKIP_BUILD=false
+NO_TUI=false
 for arg in "$@"; do
     case "$arg" in
         --skip-build) SKIP_BUILD=true ;;
+        --no-tui) NO_TUI=true ;;
         --help|-h)
-            echo "Usage: $0 [--skip-build]"
+            echo "Usage: $0 [--skip-build] [--no-tui]"
             echo ""
             echo "Launches the full onion routing demo on localhost."
+            echo "By default the tor-client runs with a TUI dashboard."
             echo ""
             echo "Options:"
             echo "  --skip-build   Skip cargo build, use existing binaries"
+            echo "  --no-tui       Run tor-client in the background (log to file)"
             echo ""
             echo "Environment variables:"
             echo "  DISCOVERY_PORT  Discovery service port  (default: 8080)"
@@ -222,68 +226,93 @@ curl -sf "http://127.0.0.1:$DISCOVERY_PORT/api/nodes" | jq '.nodes[] | {node_typ
 
 section "Starting Tor Client (SOCKS5 on port $SOCKS_PORT)"
 
-RUST_LOG="$RUST_LOG" \
-    "$CLIENT_BIN" \
-    --socks-addr "127.0.0.1:$SOCKS_PORT" \
-    --directory-url "http://127.0.0.1:$DISCOVERY_PORT" \
-    --pool-size "$POOL_SIZE" \
-    > "$LOG_DIR/tor-client.log" 2>&1 &
-PIDS+=($!)
-echo "  PID: ${PIDS[-1]}"
+if [ "$NO_TUI" = true ]; then
+    # Background mode — log to file, no TUI
+    RUST_LOG="$RUST_LOG" \
+        "$CLIENT_BIN" \
+        --socks-addr "127.0.0.1:$SOCKS_PORT" \
+        --directory-url "http://127.0.0.1:$DISCOVERY_PORT" \
+        --pool-size "$POOL_SIZE" \
+        > "$LOG_DIR/tor-client.log" 2>&1 &
+    PIDS+=($!)
+    echo "  PID: ${PIDS[-1]}"
 
-# Give the client time to build its circuit pool
-echo "  Waiting for tor-client to build circuits..."
-wait_for_tcp 127.0.0.1 "$SOCKS_PORT" "tor-client SOCKS5" 60
-echo "  Tor client SOCKS5 proxy is ready."
+    # Give the client time to build its circuit pool
+    echo "  Waiting for tor-client to build circuits..."
+    wait_for_tcp 127.0.0.1 "$SOCKS_PORT" "tor-client SOCKS5" 60
+    echo "  Tor client SOCKS5 proxy is ready."
 
-# ---- Summary ----
+    # ---- Summary ----
 
-section "All services running!"
+    section "All services running!"
 
-echo ""
-echo "  Discovery:   http://127.0.0.1:$DISCOVERY_PORT  (Swagger: /swagger-ui)"
-echo "  Entry relay:  127.0.0.1:$ENTRY_PORT"
-echo "  Middle relay: 127.0.0.1:$MIDDLE_PORT"
-echo "  Exit relay:   127.0.0.1:$EXIT_PORT"
-echo "  SOCKS5 proxy: 127.0.0.1:$SOCKS_PORT"
-echo ""
-echo "  Log directory: $LOG_DIR/"
-echo ""
-echo "Test with:"
-echo "  curl --socks5 127.0.0.1:$SOCKS_PORT http://example.com"
-echo "  curl --socks5 127.0.0.1:$SOCKS_PORT http://httpbin.org/ip"
-echo ""
-echo "Monitor logs:"
-echo "  tail -f $LOG_DIR/discovery.log"
-echo "  tail -f $LOG_DIR/relay-entry.log"
-echo "  tail -f $LOG_DIR/tor-client.log"
-echo ""
-echo "Press Ctrl+C to stop all services."
-echo ""
+    echo ""
+    echo "  Discovery:   http://127.0.0.1:$DISCOVERY_PORT  (Swagger: /swagger-ui)"
+    echo "  Entry relay:  127.0.0.1:$ENTRY_PORT"
+    echo "  Middle relay: 127.0.0.1:$MIDDLE_PORT"
+    echo "  Exit relay:   127.0.0.1:$EXIT_PORT"
+    echo "  SOCKS5 proxy: 127.0.0.1:$SOCKS_PORT"
+    echo ""
+    echo "  Log directory: $LOG_DIR/"
+    echo ""
+    echo "Test with:"
+    echo "  curl --socks5 127.0.0.1:$SOCKS_PORT http://example.com"
+    echo "  curl --socks5 127.0.0.1:$SOCKS_PORT http://httpbin.org/ip"
+    echo ""
+    echo "Monitor logs:"
+    echo "  tail -f $LOG_DIR/discovery.log"
+    echo "  tail -f $LOG_DIR/relay-entry.log"
+    echo "  tail -f $LOG_DIR/tor-client.log"
+    echo ""
+    echo "Press Ctrl+C to stop all services."
+    echo ""
 
-# ---- Keep alive until Ctrl+C ----
+    # ---- Keep alive until Ctrl+C ----
 
-# Wait for any child to exit (abnormally). If a service dies, report it.
-while true; do
-    for i in "${!PIDS[@]}"; do
-        pid="${PIDS[$i]}"
-        if ! kill -0 "$pid" 2>/dev/null; then
-            wait "$pid" 2>/dev/null
-            exit_code=$?
-            if [ "$exit_code" -ne 0 ]; then
-                echo "WARNING: Process $pid exited with code $exit_code"
-                echo "Check logs in $LOG_DIR/ for details."
+    while true; do
+        for i in "${!PIDS[@]}"; do
+            pid="${PIDS[$i]}"
+            if ! kill -0 "$pid" 2>/dev/null; then
+                wait "$pid" 2>/dev/null
+                exit_code=$?
+                if [ "$exit_code" -ne 0 ]; then
+                    echo "WARNING: Process $pid exited with code $exit_code"
+                    echo "Check logs in $LOG_DIR/ for details."
+                fi
+                unset 'PIDS[$i]'
             fi
-            # Remove from array
-            unset 'PIDS[$i]'
+        done
+
+        if [ "${#PIDS[@]}" -eq 0 ]; then
+            echo "All services have stopped."
+            exit 1
         fi
+
+        sleep 2
     done
+else
+    # TUI mode (default) — tor-client runs in foreground with --tui
+    echo "  Launching tor-client with TUI dashboard..."
+    echo "  (Press 'q' in the TUI or Ctrl+C to stop everything)"
+    echo ""
+    echo "  Discovery:   http://127.0.0.1:$DISCOVERY_PORT  (Swagger: /swagger-ui)"
+    echo "  Entry relay:  127.0.0.1:$ENTRY_PORT"
+    echo "  Middle relay: 127.0.0.1:$MIDDLE_PORT"
+    echo "  Exit relay:   127.0.0.1:$EXIT_PORT"
+    echo "  SOCKS5 proxy: 127.0.0.1:$SOCKS_PORT"
+    echo ""
+    echo "Test from another terminal:"
+    echo "  curl --socks5 127.0.0.1:$SOCKS_PORT http://example.com"
+    echo ""
 
-    # If all processes died, exit
-    if [ "${#PIDS[@]}" -eq 0 ]; then
-        echo "All services have stopped."
-        exit 1
-    fi
-
-    sleep 2
-done
+    # Run tor-client in the foreground — the TUI takes over the terminal.
+    # When the user quits (q / Ctrl+C), this process exits and the
+    # cleanup trap fires, stopping all background services.
+    RUST_LOG="$RUST_LOG" \
+        "$CLIENT_BIN" \
+        --socks-addr "127.0.0.1:$SOCKS_PORT" \
+        --directory-url "http://127.0.0.1:$DISCOVERY_PORT" \
+        --pool-size "$POOL_SIZE" \
+        --tui
+    # When tor-client exits, the EXIT trap cleans up background services.
+fi

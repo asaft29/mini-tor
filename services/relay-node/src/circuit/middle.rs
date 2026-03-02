@@ -1,5 +1,6 @@
 use crate::circuit::handler::{CircuitContext, CircuitState, NextHop};
 use crate::keypair::KeyPair;
+use crate::metrics::{EventKind, RelayMetrics};
 use common::{
     crypto::{SessionKey, aes_decrypt, aes_encrypt, derive_session_key},
     protocol::{CircuitId, Message, MessageCommand},
@@ -17,6 +18,7 @@ pub struct MiddleCircuitHandler {
     context: CircuitContext,
     keypair: KeyPair,
     next_hop: Option<NextHop>,
+    metrics: Option<Arc<RelayMetrics>>,
 }
 
 impl MiddleCircuitHandler {
@@ -26,7 +28,13 @@ impl MiddleCircuitHandler {
             context: CircuitContext::new(circuit_id),
             keypair,
             next_hop: None,
+            metrics: None,
         }
+    }
+
+    /// Set optional metrics for TUI event reporting
+    pub fn set_metrics(&mut self, metrics: Arc<RelayMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     /// Handle EXTENDED message (response to EXTEND from entry node)
@@ -135,6 +143,13 @@ impl MiddleCircuitHandler {
         );
 
         self.next_hop = Some(NextHop::new(stream));
+
+        if let Some(m) = &self.metrics {
+            m.push_event(EventKind::CircuitExtended {
+                circuit_id: self.context.circuit_id,
+                next_hop: addr.to_string(),
+            });
+        }
 
         // Encrypt the EXTENDED response with our backward key
         let encrypted_response = aes_encrypt(&created_msg.data, &session_key.backward);
@@ -291,6 +306,7 @@ impl MiddleCircuitHandler {
         &mut self,
         circuit_registry: Arc<Mutex<crate::circuit::handler::CircuitRegistry>>,
         prev_hop_write: Arc<Mutex<WriteHalf<TcpStream>>>,
+        metrics: Arc<RelayMetrics>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let circuit_id = self.context.circuit_id;
 
@@ -309,6 +325,9 @@ impl MiddleCircuitHandler {
                             "Middle: Received backward message from next hop for circuit {}",
                             circuit_id
                         );
+
+                        let backward_command = msg.command;
+                        let backward_bytes = msg.data.len();
 
                         let response = {
                             let mut registry = circuit_registry.lock().await;
@@ -332,6 +351,15 @@ impl MiddleCircuitHandler {
                             break;
                         }
                         debug!("Middle: Sent backward message to previous hop");
+
+                        metrics
+                            .bytes_received
+                            .fetch_add(backward_bytes as u64, std::sync::atomic::Ordering::Relaxed);
+                        metrics.push_event(EventKind::RelayBackward {
+                            circuit_id,
+                            command: backward_command,
+                            bytes: backward_bytes,
+                        });
                     }
                     Ok(_) => {
                         info!(

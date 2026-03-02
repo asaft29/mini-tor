@@ -1,4 +1,5 @@
 use crate::error::RegistryError;
+use crate::metrics::DiscoveryMetrics;
 use common::{NodeDescriptor, NodeType};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
 
-pub type AppState = Arc<tokio::sync::RwLock<NodeRegistry>>;
+/// Shared application state passed to all Axum handlers
+///
+/// Wraps the node registry (behind `RwLock` for concurrent access)
+/// and the optional TUI metrics (always `Arc` for cheap cloning).
+#[derive(Clone)]
+pub struct AppState {
+    /// The node registry
+    pub registry: Arc<tokio::sync::RwLock<NodeRegistry>>,
+    /// Optional TUI metrics (None when TUI is disabled)
+    pub metrics: Option<Arc<DiscoveryMetrics>>,
+}
 
 /// Entry in the node registry with metadata
 #[derive(Debug, Clone)]

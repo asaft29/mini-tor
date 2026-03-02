@@ -16,6 +16,10 @@ pub struct TorClientConfig {
     /// Number of circuits to maintain in the pool
     #[arg(long, default_value = "3")]
     pub pool_size: usize,
+
+    /// Enable TUI dashboard (disables stdout logging)
+    #[arg(long)]
+    pub tui: bool,
 }
 
 #[cfg(test)]
