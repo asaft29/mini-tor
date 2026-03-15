@@ -2,13 +2,13 @@ use crate::crypto_engine::OnionKeys;
 use crate::directory_client::DirectoryClient;
 use crate::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
-use common::crypto::{EphemeralKeyPair, SessionKey, aes_decrypt, aes_encrypt, derive_session_key};
+use common::crypto::{CipherPair, EphemeralKeyPair, SessionKey, derive_session_key};
 use common::metrics::Direction;
-use common::{CircuitId, Message, MessageCommand, NodeDescriptor, StreamId};
+use common::{CELL_SIZE, CircuitId, Message, MessageCommand, NodeDescriptor, StreamId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
@@ -85,26 +85,29 @@ impl Circuit {
     /// # Errors
     /// Returns an error if writing to the entry node fails
     pub async fn send_message(
-        &self,
+        &mut self,
         stream_id: StreamId,
         command: MessageCommand,
         data: &[u8],
     ) -> Result<()> {
-        let encrypted_data = self.onion_keys.onion_encrypt(data);
-        let msg = Message::new(self.circuit_id, stream_id, command, encrypted_data);
-        let bytes = msg.to_bytes();
+        // Compute forward digest BEFORE encryption (over plaintext fields)
+        let digest = self
+            .onion_keys
+            .forward_digest
+            .update(stream_id, command.to_u8(), data);
+
+        let mut encrypted_data = data.to_vec();
+        self.onion_keys.onion_encrypt(&mut encrypted_data);
+        let mut msg = Message::new(self.circuit_id, stream_id, command, encrypted_data);
+        msg.digest = digest;
 
         let mut writer = self.entry_writer.lock().await;
-        writer
-            .write_all(&bytes)
+        msg.write_to_stream(&mut *writer)
             .await
             .context("Failed to write to entry node")?;
         debug!(
             "Sent {} message ({} bytes) on circuit {} stream {}",
-            command,
-            bytes.len(),
-            self.circuit_id,
-            stream_id,
+            command, CELL_SIZE, self.circuit_id, stream_id,
         );
 
         Ok(())
@@ -116,10 +119,8 @@ impl Circuit {
     /// Returns an error if writing to the entry node fails
     #[allow(dead_code)]
     pub async fn send_raw(&self, msg: &Message) -> Result<()> {
-        let bytes = msg.to_bytes();
         let mut writer = self.entry_writer.lock().await;
-        writer
-            .write_all(&bytes)
+        msg.write_to_stream(&mut *writer)
             .await
             .context("Failed to write to entry node")?;
         Ok(())
@@ -185,12 +186,18 @@ impl CircuitBuilder {
 
         // Step 2: CREATE handshake with entry
         let entry_key = Self::handshake_create(circuit_id, &mut entry_stream, entry).await?;
+        let mut entry_cipher = CipherPair::new(&entry_key);
         info!("Completed CREATE handshake with entry node");
 
         // Step 3: EXTEND to middle node
-        let middle_key =
-            Self::handshake_extend_to_middle(circuit_id, &mut entry_stream, middle, &entry_key)
-                .await?;
+        let middle_key = Self::handshake_extend_to_middle(
+            circuit_id,
+            &mut entry_stream,
+            middle,
+            &mut entry_cipher,
+        )
+        .await?;
+        let mut middle_cipher = CipherPair::new(&middle_key);
         info!("Completed EXTEND to middle node");
 
         // Step 4: EXTEND to exit node
@@ -198,13 +205,21 @@ impl CircuitBuilder {
             circuit_id,
             &mut entry_stream,
             exit,
-            &entry_key,
-            &middle_key,
+            &mut entry_cipher,
+            &mut middle_cipher,
         )
         .await?;
+        let exit_cipher = CipherPair::new(&exit_key);
         info!("Completed EXTEND to exit node");
 
-        let onion_keys = OnionKeys::new(entry_key, middle_key, exit_key);
+        let onion_keys = OnionKeys::from_parts(
+            entry_key,
+            middle_key,
+            exit_key,
+            entry_cipher,
+            middle_cipher,
+            exit_cipher,
+        );
 
         // Build human-readable path string for TUI display
         let path_display = Some(format!(
@@ -247,9 +262,8 @@ impl CircuitBuilder {
 
         // Send CREATE
         let create_msg = Message::create(circuit_id, our_public.to_vec());
-        let bytes = create_msg.to_bytes();
-        stream
-            .write_all(&bytes)
+        create_msg
+            .write_to_stream(stream)
             .await
             .context("Failed to send CREATE")?;
         debug!("Sent CREATE to entry node");
@@ -294,13 +308,13 @@ impl CircuitBuilder {
 
     /// Step 3: EXTEND to the middle node
     ///
-    /// Sends EXTEND with the middle node's address and our public key (encrypted with entry key).
+    /// Sends EXTEND with the middle node's address and our public key (encrypted with entry cipher).
     /// Entry node connects to middle, forwards CREATE, returns CREATED response as EXTENDED.
     async fn handshake_extend_to_middle(
         circuit_id: CircuitId,
         stream: &mut TcpStream,
         middle: &NodeDescriptor,
-        entry_key: &SessionKey,
+        entry_cipher: &mut CipherPair,
     ) -> Result<SessionKey> {
         // Generate ephemeral keypair for middle hop
         let ephemeral = EphemeralKeyPair::generate();
@@ -313,14 +327,13 @@ impl CircuitBuilder {
         extend_payload.push(0); // null terminator
         extend_payload.extend_from_slice(&our_public);
 
-        // Encrypt with entry's forward key (one layer)
-        let encrypted_payload = aes_encrypt(&extend_payload, &entry_key.forward);
+        // Encrypt with entry's forward cipher (one layer, in-place)
+        entry_cipher.apply_forward(&mut extend_payload);
 
         // Send EXTEND
-        let extend_msg = Message::extend(circuit_id, encrypted_payload);
-        let bytes = extend_msg.to_bytes();
-        stream
-            .write_all(&bytes)
+        let extend_msg = Message::extend(circuit_id, extend_payload);
+        extend_msg
+            .write_to_stream(stream)
             .await
             .context("Failed to send EXTEND to middle")?;
         debug!("Sent EXTEND for middle node {}", middle.address);
@@ -340,8 +353,8 @@ impl CircuitBuilder {
         }
 
         // Decrypt EXTENDED response (entry added one backward layer)
-        let decrypted = aes_decrypt(&extended_msg.data, &entry_key.backward)
-            .context("Failed to decrypt EXTENDED from middle")?;
+        let mut decrypted = extended_msg.data;
+        entry_cipher.apply_backward(&mut decrypted);
 
         if decrypted.len() < 32 {
             return Err(anyhow::anyhow!(
@@ -376,8 +389,8 @@ impl CircuitBuilder {
         circuit_id: CircuitId,
         stream: &mut TcpStream,
         exit: &NodeDescriptor,
-        entry_key: &SessionKey,
-        middle_key: &SessionKey,
+        entry_cipher: &mut CipherPair,
+        middle_cipher: &mut CipherPair,
     ) -> Result<SessionKey> {
         // Generate ephemeral keypair for exit hop
         let ephemeral = EphemeralKeyPair::generate();
@@ -390,15 +403,14 @@ impl CircuitBuilder {
         extend_payload.push(0); // null terminator
         extend_payload.extend_from_slice(&our_public);
 
-        // Encrypt with middle's forward key first, then entry's forward key (2 layers)
-        let layer2 = aes_encrypt(&extend_payload, &middle_key.forward);
-        let encrypted_payload = aes_encrypt(&layer2, &entry_key.forward);
+        // Encrypt with middle's forward cipher first, then entry's forward cipher (2 layers)
+        middle_cipher.apply_forward(&mut extend_payload);
+        entry_cipher.apply_forward(&mut extend_payload);
 
         // Send EXTEND
-        let extend_msg = Message::extend(circuit_id, encrypted_payload);
-        let bytes = extend_msg.to_bytes();
-        stream
-            .write_all(&bytes)
+        let extend_msg = Message::extend(circuit_id, extend_payload);
+        extend_msg
+            .write_to_stream(stream)
             .await
             .context("Failed to send EXTEND to exit")?;
         debug!("Sent EXTEND for exit node {}", exit.address);
@@ -418,10 +430,9 @@ impl CircuitBuilder {
         }
 
         // Decrypt EXTENDED response: entry added backward layer, middle added backward layer
-        let after_entry = aes_decrypt(&extended_msg.data, &entry_key.backward)
-            .context("Failed to decrypt entry layer of EXTENDED from exit")?;
-        let decrypted = aes_decrypt(&after_entry, &middle_key.backward)
-            .context("Failed to decrypt middle layer of EXTENDED from exit")?;
+        let mut decrypted = extended_msg.data;
+        entry_cipher.apply_backward(&mut decrypted);
+        middle_cipher.apply_backward(&mut decrypted);
 
         if decrypted.len() < 32 {
             return Err(anyhow::anyhow!(
@@ -704,19 +715,27 @@ pub fn spawn_circuit_reader(
             );
 
             // Lock circuit briefly for decryption + routing
-            let circuit_guard = circuit.lock().await;
+            let mut circuit_guard = circuit.lock().await;
 
-            // Decrypt the onion layers
-            let decrypted_data = match circuit_guard.onion_keys.onion_decrypt(&msg.data) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!(
-                        "Failed to decrypt backward message on circuit {}: {}",
-                        circuit_id, e
-                    );
-                    continue;
-                }
-            };
+            // Decrypt the onion layers (in-place, zero overhead)
+            let mut decrypted_data = msg.data;
+            circuit_guard.onion_keys.onion_decrypt(&mut decrypted_data);
+
+            // Verify backward running digest (integrity check from exit node)
+            if !circuit_guard.onion_keys.backward_digest.verify(
+                msg.stream_id,
+                msg.command.to_u8(),
+                &decrypted_data,
+                msg.digest,
+            ) {
+                error!(
+                    "Backward digest mismatch on circuit {} stream {} — possible tampering, tearing down circuit",
+                    circuit_id, msg.stream_id
+                );
+                circuit_guard.state = CircuitState::Closed;
+                metrics.push_event(EventKind::CircuitClosed { circuit_id });
+                break;
+            }
 
             let data_len = decrypted_data.len();
 
@@ -750,6 +769,15 @@ pub fn spawn_circuit_reader(
                     msg.stream_id, circuit_id, msg.command
                 );
             }
+        }
+
+        // Clean up: mark circuit as closed and drop all stream senders so that
+        // any handle_stream() waiting on rx.recv() immediately gets None instead
+        // of hanging until the 30-second timeout.
+        {
+            let mut circuit_guard = circuit.lock().await;
+            circuit_guard.state = CircuitState::Closed;
+            circuit_guard.stream_senders.clear();
         }
 
         info!("Circuit reader terminated for circuit {}", circuit_id);

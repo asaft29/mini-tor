@@ -3,6 +3,10 @@
 //! These tests simulate relay nodes using in-process TCP listeners that
 //! perform real Diffie-Hellman key exchange, validating the full telescopic
 //! handshake (CREATE + 2 EXTENDs) over loopback.
+//!
+//! The simulated relays use `CipherPair` (stateful AES-CTR with IV=0) to
+//! match the real relay implementation. The cipher state is accumulated
+//! across handshake messages just like in production.
 
 #![allow(
     clippy::unwrap_used,
@@ -11,7 +15,7 @@
     clippy::doc_lazy_continuation
 )]
 
-use common::crypto::{aes_decrypt, aes_encrypt, derive_session_key};
+use common::crypto::{CipherPair, derive_session_key};
 use common::{Message, MessageCommand, NodeDescriptor, NodeType, PublicKey};
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
@@ -42,10 +46,13 @@ fn relay_dh(client_public: &[u8; 32]) -> ([u8; 32], common::crypto::SessionKey) 
 }
 
 /// Spawn a simulated entry node that handles:
-/// 1. CREATE → CREATED  (DH handshake)
-/// 2. EXTEND → connects to next hop, forwards CREATE, receives CREATED,
-///    encrypts CREATED payload with backward key, sends EXTENDED back
-/// Returns the listener's local address.
+/// 1. CREATE -> CREATED  (DH handshake)
+/// 2. EXTEND -> connects to next hop, forwards CREATE, receives CREATED,
+///    encrypts CREATED payload with backward cipher, sends EXTENDED back
+/// 3. Second EXTEND -> decrypts one layer (forward), forwards to middle,
+///    reads EXTENDED from middle, adds backward layer, sends back
+///
+/// Uses stateful `CipherPair` matching real relay behavior.
 async fn spawn_entry_relay() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -61,6 +68,9 @@ async fn spawn_entry_relay() -> std::net::SocketAddr {
         client_pub.copy_from_slice(&create_msg.data[0..32]);
         let (relay_pub, session_key) = relay_dh(&client_pub);
 
+        // Create stateful cipher pair (matches real entry.rs behavior)
+        let mut cipher = CipherPair::new(&session_key);
+
         let created_msg = Message::created(create_msg.circuit_id, relay_pub.to_vec());
         stream.write_all(&created_msg.to_bytes()).await.unwrap();
 
@@ -68,8 +78,9 @@ async fn spawn_entry_relay() -> std::net::SocketAddr {
         let extend_msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
         assert_eq!(extend_msg.command, MessageCommand::Extend);
 
-        // Decrypt the EXTEND payload with our forward key
-        let decrypted = aes_decrypt(&extend_msg.data, &session_key.forward).unwrap();
+        // Decrypt the EXTEND payload with forward cipher (stateful)
+        let mut decrypted = extend_msg.data.clone();
+        cipher.apply_forward(&mut decrypted);
 
         // Parse "addr:port\0" + public_key
         let null_pos = decrypted.iter().position(|&b| b == 0).unwrap();
@@ -92,8 +103,9 @@ async fn spawn_entry_relay() -> std::net::SocketAddr {
             .unwrap();
         assert_eq!(created_from_middle.command, MessageCommand::Created);
 
-        // Encrypt CREATED payload with our backward key, send as EXTENDED
-        let encrypted = aes_encrypt(&created_from_middle.data, &session_key.backward);
+        // Encrypt CREATED payload with backward cipher, send as EXTENDED
+        let mut encrypted = created_from_middle.data.clone();
+        cipher.apply_backward(&mut encrypted);
         let extended_msg = Message::extended(extend_msg.circuit_id, encrypted);
         stream.write_all(&extended_msg.to_bytes()).await.unwrap();
 
@@ -101,8 +113,9 @@ async fn spawn_entry_relay() -> std::net::SocketAddr {
         let extend2_msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
         assert_eq!(extend2_msg.command, MessageCommand::Extend);
 
-        // Decrypt one layer with our forward key (still has middle's layer)
-        let after_entry = aes_decrypt(&extend2_msg.data, &session_key.forward).unwrap();
+        // Decrypt one layer with forward cipher (still has middle's layer)
+        let mut after_entry = extend2_msg.data.clone();
+        cipher.apply_forward(&mut after_entry);
 
         // Forward to middle as EXTEND
         let fwd_extend = Message::extend(extend2_msg.circuit_id, after_entry);
@@ -116,8 +129,9 @@ async fn spawn_entry_relay() -> std::net::SocketAddr {
         assert_eq!(extended_from_middle.command, MessageCommand::Extended);
 
         // Add our backward layer
-        let encrypted = aes_encrypt(&extended_from_middle.data, &session_key.backward);
-        let extended2_msg = Message::extended(extend2_msg.circuit_id, encrypted);
+        let mut encrypted2 = extended_from_middle.data.clone();
+        cipher.apply_backward(&mut encrypted2);
+        let extended2_msg = Message::extended(extend2_msg.circuit_id, encrypted2);
         stream.write_all(&extended2_msg.to_bytes()).await.unwrap();
     });
 
@@ -125,9 +139,11 @@ async fn spawn_entry_relay() -> std::net::SocketAddr {
 }
 
 /// Spawn a simulated middle node that handles:
-/// 1. CREATE → CREATED (DH handshake)
-/// 2. EXTEND → connects to exit, forwards CREATE, receives CREATED,
-///    encrypts with backward key, sends EXTENDED
+/// 1. CREATE -> CREATED (DH handshake)
+/// 2. EXTEND -> connects to exit, forwards CREATE, receives CREATED,
+///    encrypts with backward cipher, sends EXTENDED
+///
+/// Uses stateful `CipherPair` matching real relay behavior.
 async fn spawn_middle_relay() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -143,6 +159,9 @@ async fn spawn_middle_relay() -> std::net::SocketAddr {
         client_pub.copy_from_slice(&create_msg.data[0..32]);
         let (relay_pub, session_key) = relay_dh(&client_pub);
 
+        // Create stateful cipher pair (matches real middle.rs behavior)
+        let mut cipher = CipherPair::new(&session_key);
+
         let created_msg = Message::created(create_msg.circuit_id, relay_pub.to_vec());
         stream.write_all(&created_msg.to_bytes()).await.unwrap();
 
@@ -150,8 +169,9 @@ async fn spawn_middle_relay() -> std::net::SocketAddr {
         let extend_msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
         assert_eq!(extend_msg.command, MessageCommand::Extend);
 
-        // Decrypt with our forward key
-        let decrypted = aes_decrypt(&extend_msg.data, &session_key.forward).unwrap();
+        // Decrypt with forward cipher (stateful)
+        let mut decrypted = extend_msg.data.clone();
+        cipher.apply_forward(&mut decrypted);
 
         // Parse "addr:port\0" + public_key
         let null_pos = decrypted.iter().position(|&b| b == 0).unwrap();
@@ -174,8 +194,9 @@ async fn spawn_middle_relay() -> std::net::SocketAddr {
             .unwrap();
         assert_eq!(created_from_exit.command, MessageCommand::Created);
 
-        // Encrypt with our backward key, send as EXTENDED
-        let encrypted = aes_encrypt(&created_from_exit.data, &session_key.backward);
+        // Encrypt with backward cipher, send as EXTENDED
+        let mut encrypted = created_from_exit.data.clone();
+        cipher.apply_backward(&mut encrypted);
         let extended_msg = Message::extended(extend_msg.circuit_id, encrypted);
         stream.write_all(&extended_msg.to_bytes()).await.unwrap();
     });
@@ -184,7 +205,7 @@ async fn spawn_middle_relay() -> std::net::SocketAddr {
 }
 
 /// Spawn a simulated exit node that handles:
-/// 1. CREATE → CREATED (DH handshake only)
+/// 1. CREATE -> CREATED (DH handshake only)
 async fn spawn_exit_relay() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

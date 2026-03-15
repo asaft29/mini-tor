@@ -16,7 +16,7 @@ use metrics::{EventKind, RelayMetrics};
 use reqwest::Client;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
-    io::{AsyncWriteExt, WriteHalf},
+    io::WriteHalf,
     net::TcpListener,
     signal,
     sync::Mutex,
@@ -337,9 +337,8 @@ async fn handle_connection(
 
                         match handler.handle_message(msg, Some(write_arc.clone())).await {
                             Ok(Some(response)) => {
-                                let bytes = response.to_bytes();
                                 let mut writer = write_arc.lock().await;
-                                if let Err(e) = writer.write_all(&bytes).await {
+                                if let Err(e) = response.write_to_stream(&mut *writer).await {
                                     error!("Failed to send CREATED response: {}", e);
                                     break;
                                 }
@@ -376,9 +375,8 @@ async fn handle_connection(
                         match registry.handle_message(msg, Some(write_arc.clone())).await {
                             Ok(Some(response)) => {
                                 let resp_bytes = response.data.len();
-                                let bytes = response.to_bytes();
                                 let mut writer = write_arc.lock().await;
-                                if let Err(e) = writer.write_all(&bytes).await {
+                                if let Err(e) = response.write_to_stream(&mut *writer).await {
                                     error!("Failed to send response: {}", e);
                                     drop(writer);
                                     drop(registry);

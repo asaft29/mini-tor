@@ -36,4 +36,10 @@ pub enum TorError {
 
     #[error("Invalid address: {0}")]
     InvalidAddress(String),
+
+    #[error("Payload too large: {size} bytes (max {max})")]
+    PayloadTooLarge { size: usize, max: usize },
+
+    #[error("Digest mismatch on circuit {circuit_id} stream {stream_id}")]
+    DigestMismatch { circuit_id: u32, stream_id: u16 },
 }

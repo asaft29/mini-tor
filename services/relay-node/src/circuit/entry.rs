@@ -2,11 +2,11 @@ use crate::circuit::handler::{CircuitContext, CircuitState, NextHop};
 use crate::keypair::KeyPair;
 use crate::metrics::{EventKind, RelayMetrics};
 use common::{
-    crypto::{SessionKey, aes_decrypt, aes_encrypt, derive_session_key},
+    crypto::{SessionKey, derive_session_key},
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::sync::Arc;
-use tokio::io::{AsyncWriteExt, WriteHalf};
+use tokio::io::WriteHalf;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
@@ -82,13 +82,14 @@ impl EntryCircuitHandler {
             self.context.circuit_id
         );
 
-        let session_key = self
+        let cipher_pair = self
             .context
-            .session_key
-            .as_ref()
+            .cipher_pair
+            .as_mut()
             .ok_or(anyhow::anyhow!("Circuit not yet established"))?;
 
-        let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
+        let mut decrypted = msg.data.clone();
+        cipher_pair.apply_forward(&mut decrypted);
 
         if decrypted.len() < 32 {
             return Err(anyhow::anyhow!("EXTEND payload too short"));
@@ -117,8 +118,7 @@ impl EntryCircuitHandler {
 
         let create_msg = Message::create(self.context.circuit_id, create_payload.to_vec());
 
-        let create_bytes = create_msg.to_bytes();
-        next_hop_stream.write_all(&create_bytes).await?;
+        create_msg.write_to_stream(&mut next_hop_stream).await?;
         debug!("Entry: Sent CREATE to next hop");
 
         let created_msg = Message::from_stream(&mut next_hop_stream)
@@ -145,7 +145,14 @@ impl EntryCircuitHandler {
 
         let response = Message::extended(self.context.circuit_id, created_msg.data);
 
-        let encrypted_data = aes_encrypt(&response.data, &session_key.backward);
+        let cipher_pair = self
+            .context
+            .cipher_pair
+            .as_mut()
+            .ok_or(anyhow::anyhow!("No cipher pair established"))?;
+
+        let mut encrypted_data = response.data.clone();
+        cipher_pair.apply_backward(&mut encrypted_data);
         let encrypted_response = Message::extended(self.context.circuit_id, encrypted_data);
 
         Ok(Some(encrypted_response))
@@ -158,21 +165,23 @@ impl EntryCircuitHandler {
             self.context.circuit_id
         );
 
-        let session_key = self
+        let cipher_pair = self
             .context
-            .session_key
-            .as_ref()
+            .cipher_pair
+            .as_mut()
             .ok_or(anyhow::anyhow!("Circuit not yet established"))?;
 
-        let decrypted = aes_decrypt(&msg.data, &session_key.forward)?;
+        let mut decrypted = msg.data.clone();
+        cipher_pair.apply_forward(&mut decrypted);
 
         if let Some(next_hop) = &mut self.next_hop {
-            let forward_msg = Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted);
+            let mut forward_msg =
+                Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted);
+            forward_msg.digest = msg.digest; // pass through intact for exit to verify
 
-            let serialized = forward_msg.to_bytes();
-            next_hop.write.write_all(&serialized).await?;
+            forward_msg.write_to_stream(&mut next_hop.write).await?;
 
-            debug!("Entry: Forwarded {} bytes to next hop", serialized.len());
+            debug!("Entry: Forwarded cell to next hop");
         } else {
             error!(
                 "Entry: No next hop configured for circuit {}",
@@ -191,20 +200,18 @@ impl EntryCircuitHandler {
             self.context.circuit_id
         );
 
-        let session_key = self
+        let cipher_pair = self
             .context
-            .session_key
-            .as_ref()
+            .cipher_pair
+            .as_mut()
             .ok_or_else(|| anyhow::anyhow!("No session key established"))?;
 
-        let encrypted = aes_encrypt(&msg.data, &session_key.backward);
+        let mut encrypted = msg.data.clone();
+        cipher_pair.apply_backward(&mut encrypted);
 
-        Ok(Some(Message::new(
-            msg.circuit_id,
-            msg.stream_id,
-            msg.command,
-            encrypted,
-        )))
+        let mut response = Message::new(msg.circuit_id, msg.stream_id, msg.command, encrypted);
+        response.digest = msg.digest; // pass through intact for client to verify
+        Ok(Some(response))
     }
 
     /// Handle an incoming message on this circuit
@@ -311,9 +318,8 @@ impl EntryCircuitHandler {
                             }
                         };
 
-                        let bytes = response.to_bytes();
                         let mut writer = client_write.lock().await;
-                        if let Err(e) = writer.write_all(&bytes).await {
+                        if let Err(e) = response.write_to_stream(&mut *writer).await {
                             error!("Entry: Error sending backward message to client: {}", e);
                             break;
                         }
@@ -354,7 +360,8 @@ impl EntryCircuitHandler {
 mod tests {
     use super::*;
     use crate::circuit::handler::CircuitState;
-    use common::crypto::{EphemeralKeyPair, aes_decrypt, derive_session_key};
+    use common::crypto::{CipherPair, EphemeralKeyPair, derive_session_key};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     #[tokio::test]
@@ -433,8 +440,10 @@ mod tests {
         assert_eq!(response.circuit_id, 1);
         assert_eq!(response.stream_id, 5);
 
-        // Client can decrypt with backward key
-        let decrypted = aes_decrypt(&response.data, &client_key.backward).unwrap();
+        // Client can decrypt with backward key using stateful CipherPair
+        let mut client_cipher = CipherPair::new(&client_key);
+        let mut decrypted = response.data.clone();
+        client_cipher.apply_backward(&mut decrypted);
         assert_eq!(decrypted, plaintext);
     }
 
@@ -502,11 +511,12 @@ mod tests {
         let create_msg = Message::create(42, client_public.to_vec());
         let created_response = handler.handle_create(create_msg).await.unwrap().unwrap();
 
-        // Derive client-side session key
+        // Derive client-side session key and create cipher pair
         let mut relay_public = [0u8; 32];
         relay_public.copy_from_slice(&created_response.data[0..32]);
         let client_shared = ephemeral.diffie_hellman(&relay_public);
         let entry_key = derive_session_key(&client_shared);
+        let mut client_cipher = CipherPair::new(&entry_key);
 
         // Build EXTEND payload: "addr:port\0" + middle_public_key
         let addr_str = middle_addr.to_string();
@@ -515,8 +525,9 @@ mod tests {
         extend_payload.push(0);
         extend_payload.extend_from_slice(&middle_public);
 
-        // Encrypt with entry forward key (client encrypts)
-        let encrypted_payload = common::crypto::aes_encrypt(&extend_payload, &entry_key.forward);
+        // Encrypt with entry forward key (client encrypts using stateful cipher)
+        let mut encrypted_payload = extend_payload.clone();
+        client_cipher.apply_forward(&mut encrypted_payload);
 
         // Send EXTEND
         let extend_msg = Message::extend(42, encrypted_payload);
@@ -526,8 +537,9 @@ mod tests {
         assert_eq!(response.command, MessageCommand::Extended);
         assert_eq!(response.circuit_id, 42);
 
-        // Decrypt the EXTENDED response
-        let decrypted = aes_decrypt(&response.data, &entry_key.backward).unwrap();
+        // Decrypt the EXTENDED response using stateful cipher
+        let mut decrypted = response.data.clone();
+        client_cipher.apply_backward(&mut decrypted);
         assert_eq!(decrypted.len(), 32);
         assert_eq!(&decrypted[..], &middle_public);
 

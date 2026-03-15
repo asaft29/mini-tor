@@ -57,7 +57,7 @@ pub async fn handle_stream(
     // 2. Send BEGIN message with destination (null-terminated)
     let begin_payload = format!("{destination}\0").into_bytes();
     {
-        let c = circuit.lock().await;
+        let mut c = circuit.lock().await;
         c.send_message(stream_id, MessageCommand::Begin, &begin_payload)
             .await
             .context("Failed to send BEGIN message")?;
@@ -145,9 +145,21 @@ pub async fn handle_stream(
                     Ok(n) => {
                         let data = buf.get(..n)
                             .ok_or_else(|| anyhow::anyhow!("Buffer read out of range"))?;
-                        let c = circuit.lock().await;
-                        if let Err(e) = c.send_message(stream_id, MessageCommand::Data, data).await {
-                            error!("Failed to send DATA on stream {}: {}", stream_id, e);
+
+                        // Chunk the data into MAX_PAYLOAD_SIZE pieces and send each as a DATA cell.
+                        // This is required because a single cell can only carry up to MAX_PAYLOAD_SIZE
+                        // bytes of application data, and SOCKS5 reads can be up to 4096 bytes
+                        // (e.g. TLS ClientHello during HTTPS handshakes).
+                        let mut send_failed = false;
+                        for chunk in data.chunks(common::MAX_PAYLOAD_SIZE) {
+                            let mut c = circuit.lock().await;
+                            if let Err(e) = c.send_message(stream_id, MessageCommand::Data, chunk).await {
+                                error!("Failed to send DATA on stream {}: {}", stream_id, e);
+                                send_failed = true;
+                                break;
+                            }
+                        }
+                        if send_failed {
                             break;
                         }
                         metrics.bytes_sent.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
@@ -213,7 +225,7 @@ async fn cleanup_stream(
 ) {
     // Best-effort send END
     {
-        let c = circuit.lock().await;
+        let mut c = circuit.lock().await;
         if let Err(e) = c.send_message(stream_id, MessageCommand::End, &[]).await {
             debug!(
                 "Failed to send END for stream {} (best-effort): {}",

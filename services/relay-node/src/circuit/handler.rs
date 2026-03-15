@@ -3,7 +3,7 @@ use crate::circuit::exit::ExitCircuitHandler;
 use crate::circuit::middle::MiddleCircuitHandler;
 use crate::metrics::RelayMetrics;
 use common::{
-    crypto::SessionKey,
+    crypto::{CipherPair, SessionKey},
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::collections::HashMap;
@@ -216,6 +216,7 @@ pub struct CircuitContext {
     pub circuit_id: CircuitId,
     pub state: CircuitState,
     pub session_key: Option<SessionKey>,
+    pub cipher_pair: Option<CipherPair>,
 }
 
 impl CircuitContext {
@@ -225,11 +226,13 @@ impl CircuitContext {
             circuit_id,
             state: CircuitState::Initializing,
             session_key: None,
+            cipher_pair: None,
         }
     }
 
-    /// Mark circuit as active with session key
+    /// Mark circuit as active with session key and create stateful cipher pair
     pub fn activate(&mut self, session_key: SessionKey) {
+        self.cipher_pair = Some(CipherPair::new(&session_key));
         self.session_key = Some(session_key);
         self.state = CircuitState::Active;
     }
@@ -238,6 +241,7 @@ impl CircuitContext {
     pub fn close(&mut self) {
         self.state = CircuitState::Closed;
         self.session_key = None;
+        self.cipher_pair = None;
     }
 }
 
@@ -275,6 +279,7 @@ mod tests {
         assert_eq!(ctx.circuit_id, 42);
         assert_eq!(ctx.state, CircuitState::Initializing);
         assert!(ctx.session_key.is_none());
+        assert!(ctx.cipher_pair.is_none());
     }
 
     #[test]
@@ -285,6 +290,7 @@ mod tests {
 
         assert_eq!(ctx.state, CircuitState::Active);
         assert_eq!(ctx.session_key.unwrap(), key);
+        assert!(ctx.cipher_pair.is_some());
     }
 
     #[test]
@@ -295,6 +301,7 @@ mod tests {
 
         assert_eq!(ctx.state, CircuitState::Closed);
         assert!(ctx.session_key.is_none());
+        assert!(ctx.cipher_pair.is_none());
     }
 
     #[test]

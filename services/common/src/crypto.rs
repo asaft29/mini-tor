@@ -12,6 +12,122 @@ use crate::PublicKey;
 
 type Aes128Ctr = Ctr128BE<Aes128>;
 
+/// Stateful AES-128-CTR cipher pair for a single circuit hop.
+///
+/// Holds persistent forward and backward stream ciphers initialized with IV=0
+/// (matching real Tor). Encryption/decryption is an XOR with the keystream,
+/// so the output is always the same size as the input — zero overhead per layer.
+///
+/// Created from a [`SessionKey`] after the DH handshake completes.
+/// Must be used behind `&mut self` because each call advances the keystream.
+pub struct CipherPair {
+    forward: Aes128Ctr,
+    backward: Aes128Ctr,
+}
+
+impl CipherPair {
+    /// Create a new cipher pair from a session key.
+    ///
+    /// Both ciphers are initialized with IV = 0 (16 zero bytes).
+    pub fn new(key: &SessionKey) -> Self {
+        let zero_iv = [0u8; 16];
+        Self {
+            forward: Aes128Ctr::new(&key.forward.into(), &zero_iv.into()),
+            backward: Aes128Ctr::new(&key.backward.into(), &zero_iv.into()),
+        }
+    }
+
+    /// Apply the forward keystream in-place (encrypt or decrypt — same in CTR).
+    ///
+    /// Used on the **forward** path: client→destination encryption on the client side,
+    /// and forward-direction decryption (layer peeling) on relay nodes.
+    pub fn apply_forward(&mut self, data: &mut [u8]) {
+        self.forward.apply_keystream(data);
+    }
+
+    /// Apply the backward keystream in-place (encrypt or decrypt — same in CTR).
+    ///
+    /// Used on the **backward** path: relay nodes encrypt responses with the backward
+    /// key, and the client decrypts (peels layers) with backward keys.
+    pub fn apply_backward(&mut self, data: &mut [u8]) {
+        self.backward.apply_keystream(data);
+    }
+}
+
+impl std::fmt::Debug for CipherPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CipherPair")
+            .field("forward", &"<Aes128Ctr>")
+            .field("backward", &"<Aes128Ctr>")
+            .finish()
+    }
+}
+
+/// Running SHA-256 digest for cell integrity verification.
+///
+/// Accumulates every relay cell's contents into a stateful SHA-256 hash.
+/// The sender embeds the first 4 bytes of the current digest snapshot into
+/// the cell's `digest` field. The receiver recomputes the same digest and
+/// compares. A mismatch means the cell was tampered with in transit.
+///
+/// One `RunningDigest` is maintained per direction per circuit endpoint
+/// (client forward, client backward, exit forward, exit backward).
+/// Matching real Tor's "recognized" mechanism (spec section 6.1).
+pub struct RunningDigest {
+    state: Sha256,
+}
+
+impl RunningDigest {
+    /// Create a fresh digest state (used after CREATE/CREATED handshake).
+    pub fn new() -> Self {
+        Self {
+            state: Sha256::new(),
+        }
+    }
+
+    /// Feed a cell's fields into the running digest and return the 4-byte snapshot.
+    ///
+    /// The caller should embed the returned bytes into the cell's `digest` field
+    /// before encrypting and sending.
+    pub fn update(&mut self, stream_id: u16, command: u8, data: &[u8]) -> [u8; 4] {
+        self.state.update(stream_id.to_be_bytes());
+        self.state.update([command]);
+        self.state.update(data);
+
+        // Take a snapshot of the current state (clone — does not reset)
+        let snapshot = self.state.clone().finalize();
+        let mut tag = [0u8; 4];
+        tag.copy_from_slice(snapshot.get(..4).unwrap_or(&[0u8; 4]));
+        tag
+    }
+
+    /// Verify a cell's digest by recomputing and comparing.
+    ///
+    /// Feeds the cell's fields into the running state (advancing it) and checks
+    /// whether the first 4 bytes match `expected`. Returns `true` on match.
+    ///
+    /// **Important:** This advances the digest state regardless of whether
+    /// verification succeeds — the state must stay in sync with the sender.
+    pub fn verify(&mut self, stream_id: u16, command: u8, data: &[u8], expected: [u8; 4]) -> bool {
+        let computed = self.update(stream_id, command, data);
+        computed == expected
+    }
+}
+
+impl Default for RunningDigest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for RunningDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningDigest")
+            .field("state", &"<Sha256>")
+            .finish()
+    }
+}
+
 /// Session key for encrypted communication between nodes
 /// Contains separate keys for forward (client to server) and backward (server to client) communication
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,5 +409,138 @@ mod tests {
         // Different input should produce different hash
         let hash3 = sha256(b"different data");
         assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_cipher_pair_roundtrip() {
+        let key = SessionKey::new([0xAA; 16], [0xBB; 16]);
+        let mut encryptor = CipherPair::new(&key);
+        let mut decryptor = CipherPair::new(&key);
+
+        let plaintext = b"Hello stateful AES-CTR!";
+        let mut buf = plaintext.to_vec();
+
+        // Encrypt with forward
+        encryptor.apply_forward(&mut buf);
+        assert_ne!(buf, plaintext);
+
+        // Decrypt with forward (same operation in CTR)
+        decryptor.apply_forward(&mut buf);
+        assert_eq!(buf, plaintext);
+    }
+
+    #[test]
+    fn test_cipher_pair_stateful_continuity() {
+        // Two consecutive encryptions must use different keystream positions
+        let key = SessionKey::new([0x42; 16], [0x99; 16]);
+        let mut cipher = CipherPair::new(&key);
+
+        let mut buf1 = vec![0u8; 16];
+        let mut buf2 = vec![0u8; 16];
+
+        cipher.apply_forward(&mut buf1);
+        cipher.apply_forward(&mut buf2);
+
+        // Both are all-zero inputs but should produce different outputs
+        // because the keystream has advanced
+        assert_ne!(buf1, buf2);
+    }
+
+    #[test]
+    fn test_cipher_pair_zero_overhead() {
+        let key = SessionKey::new([1u8; 16], [2u8; 16]);
+        let mut cipher = CipherPair::new(&key);
+
+        let data = b"exact same size";
+        let mut buf = data.to_vec();
+        let original_len = buf.len();
+
+        cipher.apply_forward(&mut buf);
+
+        // Output length must equal input length (zero overhead)
+        assert_eq!(buf.len(), original_len);
+    }
+
+    #[test]
+    fn test_cipher_pair_backward_direction() {
+        let key = SessionKey::new([0xAA; 16], [0xBB; 16]);
+        let mut encryptor = CipherPair::new(&key);
+        let mut decryptor = CipherPair::new(&key);
+
+        let plaintext = b"backward direction test";
+        let mut buf = plaintext.to_vec();
+
+        encryptor.apply_backward(&mut buf);
+        assert_ne!(buf, plaintext);
+
+        decryptor.apply_backward(&mut buf);
+        assert_eq!(buf, plaintext);
+    }
+
+    #[test]
+    fn test_running_digest_update_returns_4_bytes() {
+        let mut digest = RunningDigest::new();
+        let tag = digest.update(1, 0x12, b"hello");
+        // Tag should be 4 bytes (non-zero for non-trivial input)
+        assert_eq!(tag.len(), 4);
+        assert_ne!(tag, [0u8; 4]);
+    }
+
+    #[test]
+    fn test_running_digest_verify_matches() {
+        let mut sender = RunningDigest::new();
+        let mut receiver = RunningDigest::new();
+
+        let tag = sender.update(1, 0x12, b"hello");
+        assert!(receiver.verify(1, 0x12, b"hello", tag));
+    }
+
+    #[test]
+    fn test_running_digest_verify_rejects_tampered() {
+        let mut sender = RunningDigest::new();
+        let mut receiver = RunningDigest::new();
+
+        let tag = sender.update(1, 0x12, b"hello");
+        // Tamper: different data on receiver side
+        assert!(!receiver.verify(1, 0x12, b"tampered", tag));
+    }
+
+    #[test]
+    fn test_running_digest_is_stateful() {
+        let mut digest = RunningDigest::new();
+
+        let tag1 = digest.update(1, 0x12, b"first");
+        let tag2 = digest.update(1, 0x12, b"first");
+
+        // Same input but different position in the running state
+        assert_ne!(tag1, tag2);
+    }
+
+    #[test]
+    fn test_running_digest_multi_cell_sync() {
+        let mut sender = RunningDigest::new();
+        let mut receiver = RunningDigest::new();
+
+        // Simulate 3 cells
+        let tag1 = sender.update(1, 0x12, b"cell one");
+        assert!(receiver.verify(1, 0x12, b"cell one", tag1));
+
+        let tag2 = sender.update(1, 0x12, b"cell two");
+        assert!(receiver.verify(1, 0x12, b"cell two", tag2));
+
+        let tag3 = sender.update(2, 0x13, b"");
+        assert!(receiver.verify(2, 0x13, b"", tag3));
+    }
+
+    #[test]
+    fn test_running_digest_default() {
+        let d1 = RunningDigest::new();
+        let d2 = RunningDigest::default();
+        // Both start from the same initial state
+        let mut d1 = d1;
+        let mut d2 = d2;
+        let t1 = d1.update(1, 0x12, b"test");
+        let t2 = d2.update(1, 0x12, b"test");
+        assert_eq!(t1, t2);
     }
 }
