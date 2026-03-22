@@ -2,7 +2,7 @@ use crate::crypto_engine::OnionKeys;
 use crate::directory_client::DirectoryClient;
 use crate::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
-use common::crypto::{CipherPair, EphemeralKeyPair, SessionKey, derive_session_key};
+use common::crypto::{CipherPair, NtorEphemeralKeyPair, SessionKey, ntor_client_finish_raw};
 use common::metrics::Direction;
 use common::{CELL_SIZE, CircuitId, Message, MessageCommand, NodeDescriptor, StreamId};
 use std::collections::HashMap;
@@ -13,52 +13,33 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
-/// Timeout for handshake operations (CREATE, EXTEND)
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// State of a circuit
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum CircuitState {
-    /// Circuit is being built (handshakes in progress)
     Building,
-    /// Circuit is ready for data transfer
     Ready,
-    /// Circuit is being torn down
     Closing,
-    /// Circuit is closed
     Closed,
 }
 
-/// A single onion routing circuit through 3 relay nodes
-///
-/// Each circuit holds:
-/// - A write half of the TCP connection to the entry node
-/// - Session keys for all 3 hops (used for onion encryption)
-/// - A map of active streams multiplexed over this circuit
+/// A single onion routing circuit through 3 relay nodes.
 pub struct Circuit {
     pub circuit_id: CircuitId,
     pub state: CircuitState,
-    /// Write half of TCP connection to the entry node
     pub entry_writer: Arc<Mutex<WriteHalf<TcpStream>>>,
-    /// Onion encryption keys for all 3 hops
     pub onion_keys: OnionKeys,
-    /// Channel senders for each active stream (stream_id -> sender)
-    /// The background reader task demuxes incoming messages by stream_id
     pub stream_senders: HashMap<StreamId, mpsc::UnboundedSender<Message>>,
-    /// Next stream ID to allocate
     next_stream_id: StreamId,
-    /// Human-readable path for TUI display (e.g. ":9001 → :9002 → :9003")
     pub path_display: Option<String>,
 }
 
 impl Circuit {
-    /// Get the number of active streams on this circuit
     pub fn active_stream_count(&self) -> usize {
         self.stream_senders.len()
     }
 
-    /// Allocate a new stream ID for this circuit
     pub fn allocate_stream_id(&mut self) -> StreamId {
         let id = self.next_stream_id;
         self.next_stream_id = self.next_stream_id.wrapping_add(1);
@@ -68,29 +49,21 @@ impl Circuit {
         id
     }
 
-    /// Register a stream sender for receiving demuxed backward messages
     pub fn register_stream(&mut self, stream_id: StreamId, sender: mpsc::UnboundedSender<Message>) {
         self.stream_senders.insert(stream_id, sender);
     }
 
-    /// Unregister a stream (on close)
     pub fn unregister_stream(&mut self, stream_id: StreamId) {
         self.stream_senders.remove(&stream_id);
     }
 
-    /// Send a message through this circuit with onion encryption
-    ///
-    /// The message data is onion-encrypted (3 layers) before sending to the entry node.
-    ///
-    /// # Errors
-    /// Returns an error if writing to the entry node fails
+    /// Send a message through this circuit with onion encryption.
     pub async fn send_message(
         &mut self,
         stream_id: StreamId,
         command: MessageCommand,
         data: &[u8],
     ) -> Result<()> {
-        // Compute forward digest BEFORE encryption (over plaintext fields)
         let digest = self
             .onion_keys
             .forward_digest
@@ -113,10 +86,7 @@ impl Circuit {
         Ok(())
     }
 
-    /// Send a raw message (no onion encryption -- used for CREATE/EXTEND handshakes)
-    ///
-    /// # Errors
-    /// Returns an error if writing to the entry node fails
+    /// Send a raw message (no onion encryption — used for CREATE/EXTEND handshakes).
     #[allow(dead_code)]
     pub async fn send_raw(&self, msg: &Message) -> Result<()> {
         let mut writer = self.entry_writer.lock().await;
@@ -127,34 +97,16 @@ impl Circuit {
     }
 }
 
-/// Result of building a circuit: the circuit itself and the read half for the reader task
+/// Result of building a circuit: the circuit itself and the read half for the reader task.
 pub struct BuiltCircuit {
     pub circuit: Circuit,
     pub read_half: ReadHalf<TcpStream>,
 }
 
-/// Builds a 3-hop circuit via telescopic handshake
-///
-/// The build process:
-/// 1. Connect to entry node via TCP
-/// 2. CREATE handshake with entry -> derive session_key_1
-/// 3. EXTEND to middle (encrypted with entry key) -> derive session_key_2
-/// 4. EXTEND to exit (encrypted with entry+middle keys) -> derive session_key_3
+/// Builds a 3-hop circuit via telescopic ntor handshake.
 pub struct CircuitBuilder;
 
 impl CircuitBuilder {
-    /// Build a complete 3-hop circuit
-    ///
-    /// Returns a `BuiltCircuit` containing the circuit and the read half of the
-    /// TCP connection to the entry node. The read half should be passed to
-    /// `spawn_circuit_reader()` for backward message processing.
-    ///
-    /// # Arguments
-    /// * `circuit_id` - Unique ID for this circuit
-    /// * `path` - Ordered list of 3 node descriptors: [entry, middle, exit]
-    ///
-    /// # Errors
-    /// Returns an error if any handshake step fails
     pub async fn build(circuit_id: CircuitId, path: &[NodeDescriptor]) -> Result<BuiltCircuit> {
         if path.len() != 3 {
             return Err(anyhow::anyhow!(
@@ -178,18 +130,15 @@ impl CircuitBuilder {
             circuit_id, entry.address, middle.address, exit.address
         );
 
-        // Step 1: Connect to entry node
         let mut entry_stream = TcpStream::connect(entry.address)
             .await
             .context("Failed to connect to entry node")?;
         info!("Connected to entry node at {}", entry.address);
 
-        // Step 2: CREATE handshake with entry
         let entry_key = Self::handshake_create(circuit_id, &mut entry_stream, entry).await?;
         let mut entry_cipher = CipherPair::new(&entry_key);
         info!("Completed CREATE handshake with entry node");
 
-        // Step 3: EXTEND to middle node
         let middle_key = Self::handshake_extend_to_middle(
             circuit_id,
             &mut entry_stream,
@@ -200,7 +149,6 @@ impl CircuitBuilder {
         let mut middle_cipher = CipherPair::new(&middle_key);
         info!("Completed EXTEND to middle node");
 
-        // Step 4: EXTEND to exit node
         let exit_key = Self::handshake_extend_to_exit(
             circuit_id,
             &mut entry_stream,
@@ -221,7 +169,6 @@ impl CircuitBuilder {
             exit_cipher,
         );
 
-        // Build human-readable path string for TUI display
         let path_display = Some(format!(
             ":{} \u{2192} :{} \u{2192} :{}",
             entry.address.port(),
@@ -229,9 +176,6 @@ impl CircuitBuilder {
             exit.address.port()
         ));
 
-        // Split the TCP stream into read and write halves
-        // The write half stays in Circuit for send_message()
-        // The read half is returned for spawn_circuit_reader()
         let (read_half, write_half) = tokio::io::split(entry_stream);
 
         let circuit = Circuit {
@@ -247,20 +191,15 @@ impl CircuitBuilder {
         Ok(BuiltCircuit { circuit, read_half })
     }
 
-    /// Step 2: CREATE handshake with the entry node
-    ///
-    /// Sends CREATE with our ephemeral public key, receives CREATED with entry's public key,
-    /// performs DH to derive the shared session key.
+    /// CREATE handshake with the entry node (ntor).
     async fn handshake_create(
         circuit_id: CircuitId,
         stream: &mut TcpStream,
-        _entry: &NodeDescriptor,
+        entry: &NodeDescriptor,
     ) -> Result<SessionKey> {
-        // Generate ephemeral keypair for this hop
-        let ephemeral = EphemeralKeyPair::generate();
+        let ephemeral = NtorEphemeralKeyPair::generate();
         let our_public = ephemeral.public.bytes;
 
-        // Send CREATE
         let create_msg = Message::create(circuit_id, our_public.to_vec());
         create_msg
             .write_to_stream(stream)
@@ -268,7 +207,6 @@ impl CircuitBuilder {
             .context("Failed to send CREATE")?;
         debug!("Sent CREATE to entry node");
 
-        // Receive CREATED (with timeout)
         let created_msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, Message::from_stream(stream))
             .await
             .context("Timed out waiting for CREATED from entry node")?
@@ -282,55 +220,59 @@ impl CircuitBuilder {
             ));
         }
 
-        if created_msg.data.len() < 32 {
+        if created_msg.data.len() < 64 {
             return Err(anyhow::anyhow!(
-                "CREATED response too short: {} bytes",
+                "CREATED response too short: {} bytes (need 64)",
                 created_msg.data.len()
             ));
         }
 
-        // Extract entry's public key
-        let mut entry_public = [0u8; 32];
-        entry_public.copy_from_slice(
+        let mut server_eph_pub = [0u8; 32];
+        server_eph_pub.copy_from_slice(
             created_msg
                 .data
                 .get(0..32)
                 .ok_or_else(|| anyhow::anyhow!("Invalid CREATED data"))?,
         );
+        let mut auth = [0u8; 32];
+        auth.copy_from_slice(
+            created_msg
+                .data
+                .get(32..64)
+                .ok_or_else(|| anyhow::anyhow!("Invalid CREATED auth"))?,
+        );
 
-        // Perform DH and derive session key
-        let shared_secret = ephemeral.diffie_hellman(&entry_public);
-        let session_key = derive_session_key(&shared_secret);
+        let session_key = ntor_client_finish_raw(
+            ephemeral.secret_bytes(),
+            &our_public,
+            &entry.public_key.bytes,
+            &server_eph_pub,
+            &auth,
+        )
+        .map_err(|e| anyhow::anyhow!("ntor handshake failed with entry: {}", e))?;
 
-        debug!("Derived session key with entry node");
+        debug!("ntor handshake complete with entry node");
         Ok(session_key)
     }
 
-    /// Step 3: EXTEND to the middle node
-    ///
-    /// Sends EXTEND with the middle node's address and our public key (encrypted with entry cipher).
-    /// Entry node connects to middle, forwards CREATE, returns CREATED response as EXTENDED.
+    /// EXTEND to the middle node (ntor, encrypted with entry cipher).
     async fn handshake_extend_to_middle(
         circuit_id: CircuitId,
         stream: &mut TcpStream,
         middle: &NodeDescriptor,
         entry_cipher: &mut CipherPair,
     ) -> Result<SessionKey> {
-        // Generate ephemeral keypair for middle hop
-        let ephemeral = EphemeralKeyPair::generate();
+        let ephemeral = NtorEphemeralKeyPair::generate();
         let our_public = ephemeral.public.bytes;
 
-        // Build EXTEND payload: "addr:port\0" + public_key (32 bytes)
         let addr_str = middle.address.to_string();
         let mut extend_payload = Vec::with_capacity(addr_str.len() + 1 + 32);
         extend_payload.extend_from_slice(addr_str.as_bytes());
-        extend_payload.push(0); // null terminator
+        extend_payload.push(0);
         extend_payload.extend_from_slice(&our_public);
 
-        // Encrypt with entry's forward cipher (one layer, in-place)
         entry_cipher.apply_forward(&mut extend_payload);
 
-        // Send EXTEND
         let extend_msg = Message::extend(circuit_id, extend_payload);
         extend_msg
             .write_to_stream(stream)
@@ -338,7 +280,6 @@ impl CircuitBuilder {
             .context("Failed to send EXTEND to middle")?;
         debug!("Sent EXTEND for middle node {}", middle.address);
 
-        // Receive EXTENDED (with timeout)
         let extended_msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, Message::from_stream(stream))
             .await
             .context("Timed out waiting for EXTENDED from middle node")?
@@ -352,39 +293,43 @@ impl CircuitBuilder {
             ));
         }
 
-        // Decrypt EXTENDED response (entry added one backward layer)
         let mut decrypted = extended_msg.data;
         entry_cipher.apply_backward(&mut decrypted);
 
-        if decrypted.len() < 32 {
+        if decrypted.len() < 64 {
             return Err(anyhow::anyhow!(
-                "EXTENDED response too short: {} bytes",
+                "EXTENDED response too short: {} bytes (need 64)",
                 decrypted.len()
             ));
         }
 
-        // Extract middle's public key
-        let mut middle_public = [0u8; 32];
-        middle_public.copy_from_slice(
+        let mut server_eph_pub = [0u8; 32];
+        server_eph_pub.copy_from_slice(
             decrypted
                 .get(0..32)
                 .ok_or_else(|| anyhow::anyhow!("Invalid EXTENDED data"))?,
         );
+        let mut auth = [0u8; 32];
+        auth.copy_from_slice(
+            decrypted
+                .get(32..64)
+                .ok_or_else(|| anyhow::anyhow!("Invalid EXTENDED auth"))?,
+        );
 
-        // Perform DH and derive session key
-        let shared_secret = ephemeral.diffie_hellman(&middle_public);
-        let session_key = derive_session_key(&shared_secret);
+        let session_key = ntor_client_finish_raw(
+            ephemeral.secret_bytes(),
+            &our_public,
+            &middle.public_key.bytes,
+            &server_eph_pub,
+            &auth,
+        )
+        .map_err(|e| anyhow::anyhow!("ntor handshake failed with middle: {}", e))?;
 
-        debug!("Derived session key with middle node");
+        debug!("ntor handshake complete with middle node");
         Ok(session_key)
     }
 
-    /// Step 4: EXTEND to the exit node
-    ///
-    /// Sends EXTEND with the exit node's address and our public key.
-    /// This is encrypted with 2 layers (middle.forward, then entry.forward).
-    /// Entry peels one layer and forwards to middle. Middle peels its layer and sees
-    /// the EXTEND payload.
+    /// EXTEND to the exit node (ntor, encrypted with 2 layers).
     async fn handshake_extend_to_exit(
         circuit_id: CircuitId,
         stream: &mut TcpStream,
@@ -392,22 +337,18 @@ impl CircuitBuilder {
         entry_cipher: &mut CipherPair,
         middle_cipher: &mut CipherPair,
     ) -> Result<SessionKey> {
-        // Generate ephemeral keypair for exit hop
-        let ephemeral = EphemeralKeyPair::generate();
+        let ephemeral = NtorEphemeralKeyPair::generate();
         let our_public = ephemeral.public.bytes;
 
-        // Build EXTEND payload: "addr:port\0" + public_key (32 bytes)
         let addr_str = exit.address.to_string();
         let mut extend_payload = Vec::with_capacity(addr_str.len() + 1 + 32);
         extend_payload.extend_from_slice(addr_str.as_bytes());
-        extend_payload.push(0); // null terminator
+        extend_payload.push(0);
         extend_payload.extend_from_slice(&our_public);
 
-        // Encrypt with middle's forward cipher first, then entry's forward cipher (2 layers)
         middle_cipher.apply_forward(&mut extend_payload);
         entry_cipher.apply_forward(&mut extend_payload);
 
-        // Send EXTEND
         let extend_msg = Message::extend(circuit_id, extend_payload);
         extend_msg
             .write_to_stream(stream)
@@ -415,7 +356,6 @@ impl CircuitBuilder {
             .context("Failed to send EXTEND to exit")?;
         debug!("Sent EXTEND for exit node {}", exit.address);
 
-        // Receive EXTENDED (with timeout)
         let extended_msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, Message::from_stream(stream))
             .await
             .context("Timed out waiting for EXTENDED from exit node")?
@@ -429,39 +369,45 @@ impl CircuitBuilder {
             ));
         }
 
-        // Decrypt EXTENDED response: entry added backward layer, middle added backward layer
         let mut decrypted = extended_msg.data;
         entry_cipher.apply_backward(&mut decrypted);
         middle_cipher.apply_backward(&mut decrypted);
 
-        if decrypted.len() < 32 {
+        if decrypted.len() < 64 {
             return Err(anyhow::anyhow!(
-                "EXTENDED response too short: {} bytes",
+                "EXTENDED response too short: {} bytes (need 64)",
                 decrypted.len()
             ));
         }
 
-        // Extract exit's public key
-        let mut exit_public = [0u8; 32];
-        exit_public.copy_from_slice(
+        let mut server_eph_pub = [0u8; 32];
+        server_eph_pub.copy_from_slice(
             decrypted
                 .get(0..32)
                 .ok_or_else(|| anyhow::anyhow!("Invalid EXTENDED data"))?,
         );
+        let mut auth = [0u8; 32];
+        auth.copy_from_slice(
+            decrypted
+                .get(32..64)
+                .ok_or_else(|| anyhow::anyhow!("Invalid EXTENDED auth"))?,
+        );
 
-        // Perform DH and derive session key
-        let shared_secret = ephemeral.diffie_hellman(&exit_public);
-        let session_key = derive_session_key(&shared_secret);
+        let session_key = ntor_client_finish_raw(
+            ephemeral.secret_bytes(),
+            &our_public,
+            &exit.public_key.bytes,
+            &server_eph_pub,
+            &auth,
+        )
+        .map_err(|e| anyhow::anyhow!("ntor handshake failed with exit: {}", e))?;
 
-        debug!("Derived session key with exit node");
+        debug!("ntor handshake complete with exit node");
         Ok(session_key)
     }
 }
 
-/// Pool of pre-built circuits for handling SOCKS5 connections
-///
-/// Maintains a configurable number of ready circuits and assigns
-/// new streams to the least-loaded circuit.
+/// Pool of pre-built circuits for handling SOCKS5 connections.
 pub struct CircuitPool {
     circuits: HashMap<CircuitId, Arc<Mutex<Circuit>>>,
     next_circuit_id: CircuitId,
@@ -471,7 +417,6 @@ pub struct CircuitPool {
 }
 
 impl CircuitPool {
-    /// Create a new circuit pool
     pub fn new(directory_client: DirectoryClient, pool_size: usize) -> Self {
         Self {
             circuits: HashMap::new(),
@@ -482,22 +427,15 @@ impl CircuitPool {
         }
     }
 
-    /// Attach metrics to this pool (call before `initialize()`)
     pub fn set_metrics(&mut self, metrics: Arc<ClientMetrics>) {
         self.metrics = Some(metrics);
     }
 
-    /// Get a reference to the metrics (if set)
     pub fn metrics(&self) -> Option<&Arc<ClientMetrics>> {
         self.metrics.as_ref()
     }
 
-    /// Pre-build circuits to fill the pool at startup
-    ///
-    /// Returns the read halves for each circuit so the caller can spawn readers.
-    ///
-    /// # Errors
-    /// Returns an error if any circuit fails to build
+    /// Pre-build circuits to fill the pool at startup.
     pub async fn initialize(&mut self) -> Result<Vec<(Arc<Mutex<Circuit>>, ReadHalf<TcpStream>)>> {
         info!("Initializing circuit pool with {} circuits", self.pool_size);
 
@@ -533,17 +471,10 @@ impl CircuitPool {
         Ok(results)
     }
 
-    /// Select the least-loaded ready circuit for a new stream
-    ///
-    /// If no ready circuits exist, builds a new one and returns its read half
-    /// so the caller can spawn a reader for it.
-    ///
-    /// # Errors
-    /// Returns an error if no circuits are available and building a new one fails
+    /// Select the least-loaded ready circuit for a new stream.
     pub async fn select_circuit(
         &mut self,
     ) -> Result<(Arc<Mutex<Circuit>>, Option<ReadHalf<TcpStream>>)> {
-        // Find the ready circuit with fewest active streams
         let mut best: Option<(CircuitId, usize)> = None;
 
         for (&circuit_id, circuit) in &self.circuits {
@@ -570,7 +501,6 @@ impl CircuitPool {
             return Ok((Arc::clone(circuit), None));
         }
 
-        // No ready circuits, build a new one
         warn!("No ready circuits available, building a new one");
         let (circuit_id, read_half) = self.build_circuit().await?;
         let circuit = self
@@ -580,12 +510,7 @@ impl CircuitPool {
         Ok((Arc::clone(circuit), Some(read_half)))
     }
 
-    /// Replace a failed circuit and replenish the pool
-    ///
-    /// Returns the new circuit ID and read half for spawning a reader.
-    ///
-    /// # Errors
-    /// Returns an error if building a replacement circuit fails
+    /// Replace a failed circuit and replenish the pool.
     pub async fn replace_circuit(
         &mut self,
         failed_id: CircuitId,
@@ -598,7 +523,6 @@ impl CircuitPool {
             .get(&circuit_id)
             .ok_or_else(|| anyhow::anyhow!("Newly built circuit {} not found", circuit_id))?;
 
-        // Push replacement event
         if let Some(ref metrics) = self.metrics {
             metrics
                 .circuits_replaced
@@ -612,9 +536,6 @@ impl CircuitPool {
         Ok((Arc::clone(circuit), read_half))
     }
 
-    /// Build a single circuit and add it to the pool
-    ///
-    /// Returns the circuit ID and the read half of the entry connection.
     async fn build_circuit(&mut self) -> Result<(CircuitId, ReadHalf<TcpStream>)> {
         let circuit_id = self.allocate_circuit_id();
         let path = self
@@ -625,13 +546,11 @@ impl CircuitPool {
 
         let built = CircuitBuilder::build(circuit_id, &path).await?;
 
-        // Capture path display before moving circuit into Arc<Mutex>
         let path_display = built.circuit.path_display.clone().unwrap_or_default();
 
         self.circuits
             .insert(circuit_id, Arc::new(Mutex::new(built.circuit)));
 
-        // Push metrics event
         if let Some(ref metrics) = self.metrics {
             metrics
                 .circuits_built
@@ -645,20 +564,17 @@ impl CircuitPool {
         Ok((circuit_id, built.read_half))
     }
 
-    /// Allocate a new unique circuit ID
     fn allocate_circuit_id(&mut self) -> CircuitId {
         let id = self.next_circuit_id;
         self.next_circuit_id = self.next_circuit_id.wrapping_add(1);
         id
     }
 
-    /// Get the number of circuits in the pool
     #[allow(dead_code)]
     pub fn circuit_count(&self) -> usize {
         self.circuits.len()
     }
 
-    /// Iterate over all circuits in the pool (for TUI display)
     pub fn iter_circuits(
         &self,
     ) -> std::collections::hash_map::Iter<'_, CircuitId, Arc<Mutex<Circuit>>> {
@@ -666,17 +582,8 @@ impl CircuitPool {
     }
 }
 
-/// Spawn a background task that reads messages from the entry node
-/// and demuxes them to the correct stream channel based on stream_id.
-///
-/// This is the backward direction reader: it reads responses coming back
-/// through the circuit, decrypts the onion layers, and routes data to
-/// the appropriate SOCKS5 connection handler.
-///
-/// Takes ownership of the `ReadHalf` so it can read without holding any locks.
-/// The circuit `Arc<Mutex<Circuit>>` is only locked briefly for decryption and
-/// stream routing, eliminating the deadlock that existed when the reader held
-/// the circuit lock during blocking reads.
+/// Spawn a background task that reads backward messages from the entry node,
+/// decrypts onion layers, and demuxes them to the correct stream channel.
 pub fn spawn_circuit_reader(
     circuit: Arc<Mutex<Circuit>>,
     mut read_half: ReadHalf<TcpStream>,
@@ -687,7 +594,6 @@ pub fn spawn_circuit_reader(
         info!("Starting circuit reader for circuit {}", circuit_id);
 
         loop {
-            // Read a message from the entry node -- no locks held during this blocking read
             let msg = match Message::from_stream(&mut read_half).await {
                 Ok(Some(msg)) => msg,
                 Ok(None) => {
@@ -714,14 +620,11 @@ pub fn spawn_circuit_reader(
                 circuit_id, msg.command, msg.stream_id
             );
 
-            // Lock circuit briefly for decryption + routing
             let mut circuit_guard = circuit.lock().await;
 
-            // Decrypt the onion layers (in-place, zero overhead)
             let mut decrypted_data = msg.data;
             circuit_guard.onion_keys.onion_decrypt(&mut decrypted_data);
 
-            // Verify backward running digest (integrity check from exit node)
             if !circuit_guard.onion_keys.backward_digest.verify(
                 msg.stream_id,
                 msg.command.to_u8(),
@@ -739,7 +642,6 @@ pub fn spawn_circuit_reader(
 
             let data_len = decrypted_data.len();
 
-            // Track backward data for DATA messages
             if msg.command == MessageCommand::Data {
                 metrics
                     .bytes_received
@@ -752,7 +654,6 @@ pub fn spawn_circuit_reader(
                 });
             }
 
-            // Create decrypted message and route to the correct stream
             let decrypted_msg =
                 Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted_data);
 
@@ -771,9 +672,6 @@ pub fn spawn_circuit_reader(
             }
         }
 
-        // Clean up: mark circuit as closed and drop all stream senders so that
-        // any handle_stream() waiting on rx.recv() immediately gets None instead
-        // of hanging until the 30-second timeout.
         {
             let mut circuit_guard = circuit.lock().await;
             circuit_guard.state = CircuitState::Closed;
@@ -805,7 +703,6 @@ mod tests {
 
     #[test]
     fn test_circuit_state_transitions() {
-        // Verify state enum variants exist and are distinguishable
         assert_ne!(CircuitState::Building, CircuitState::Ready);
         assert_ne!(CircuitState::Ready, CircuitState::Closing);
         assert_ne!(CircuitState::Closing, CircuitState::Closed);
@@ -821,7 +718,6 @@ mod tests {
 
     #[test]
     fn test_stream_id_allocation_skips_zero() {
-        // Test the stream ID allocation counter logic
         let mut next_id: StreamId = 1;
 
         let id1 = next_id;
@@ -834,11 +730,9 @@ mod tests {
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);
 
-        // Test wrapping behavior: when counter reaches 0, it should skip to 1
         let mut wrap_id: StreamId = u16::MAX;
         wrap_id = wrap_id.wrapping_add(1);
         assert_eq!(wrap_id, 0);
-        // In the actual allocate_stream_id, 0 would be skipped to 1
         if wrap_id == 0 {
             wrap_id = 1;
         }

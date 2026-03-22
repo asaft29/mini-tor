@@ -29,7 +29,6 @@ use uuid::Uuid;
 async fn main() -> Result<()> {
     let config = RelayConfig::parse();
 
-    // Set up tracing: when TUI is active, send logs to sink to avoid corrupting display
     if config.tui {
         use tracing_subscriber::fmt::writer::MakeWriterExt;
         tracing_subscriber::fmt()
@@ -161,7 +160,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Register this node with the directory service
 async fn register_with_directory(
     client: &Client,
     directory_url: &str,
@@ -190,7 +188,6 @@ async fn register_with_directory(
     }
 }
 
-/// Unregister this node from the directory service
 async fn unregister_from_directory(
     client: &Client,
     directory_url: &str,
@@ -217,7 +214,6 @@ async fn unregister_from_directory(
     }
 }
 
-/// Periodically send heartbeats to the directory service
 async fn heartbeat_loop(
     client: Client,
     directory_url: String,
@@ -245,7 +241,6 @@ async fn heartbeat_loop(
     }
 }
 
-/// Accept incoming TCP connections
 async fn accept_connections(
     listener: TcpListener,
     circuit_registry: Arc<Mutex<CircuitRegistry>>,
@@ -277,14 +272,10 @@ async fn accept_connections(
     }
 }
 
-/// Handle a single TCP connection
+/// Handle a single TCP connection.
 ///
-/// The client-facing TcpStream is split into read and write halves using
-/// `tokio::io::split()`. The read half is used directly in the main loop
-/// (no mutex needed), while the write half is wrapped in `Arc<Mutex<...>>`
-/// and shared with background tasks that send backward-direction messages.
-/// This prevents the deadlock where the main read loop would hold a mutex
-/// on the full stream while background writers wait to send responses.
+/// Read half is used directly in the main loop; write half is shared with
+/// background tasks via Arc<Mutex> to avoid deadlocks on bidirectional I/O.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     addr: SocketAddr,
@@ -295,8 +286,6 @@ async fn handle_connection(
 ) {
     info!("Handling connection from {}", addr);
 
-    // Split the client-facing stream: read half for the main loop,
-    // write half shared with background tasks for backward messages.
     let (mut read_half, write_half) = tokio::io::split(stream);
     let write_arc: Arc<Mutex<WriteHalf<tokio::net::TcpStream>>> = Arc::new(Mutex::new(write_half));
 
@@ -384,7 +373,6 @@ async fn handle_connection(
                                 }
                                 drop(writer);
 
-                                // Push forward relay event for non-circuit-management commands
                                 if !matches!(
                                     command,
                                     common::protocol::MessageCommand::Extended
@@ -427,7 +415,6 @@ async fn handle_connection(
                                 }
                             }
                             Ok(None) => {
-                                // EXTEND that returns None still needs relay event
                                 if matches!(command, common::protocol::MessageCommand::Destroy) {
                                     metrics
                                         .circuits_destroyed

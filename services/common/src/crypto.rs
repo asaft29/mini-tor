@@ -2,24 +2,18 @@ use aes::Aes128;
 use aes::cipher::{KeyIvInit, StreamCipher};
 use anyhow::anyhow;
 use ctr::Ctr128BE;
+use hmac::{Hmac, Mac};
 use rand::Rng;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tor_llcrypto::pk::curve25519::{EphemeralSecret, PublicKey as X25519PublicKey};
+use tor_llcrypto::pk::curve25519::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::PublicKey;
 
 type Aes128Ctr = Ctr128BE<Aes128>;
 
 /// Stateful AES-128-CTR cipher pair for a single circuit hop.
-///
-/// Holds persistent forward and backward stream ciphers initialized with IV=0
-/// (matching real Tor). Encryption/decryption is an XOR with the keystream,
-/// so the output is always the same size as the input — zero overhead per layer.
-///
-/// Created from a [`SessionKey`] after the DH handshake completes.
-/// Must be used behind `&mut self` because each call advances the keystream.
 pub struct CipherPair {
     forward: Aes128Ctr,
     backward: Aes128Ctr,
@@ -27,8 +21,6 @@ pub struct CipherPair {
 
 impl CipherPair {
     /// Create a new cipher pair from a session key.
-    ///
-    /// Both ciphers are initialized with IV = 0 (16 zero bytes).
     pub fn new(key: &SessionKey) -> Self {
         let zero_iv = [0u8; 16];
         Self {
@@ -37,18 +29,12 @@ impl CipherPair {
         }
     }
 
-    /// Apply the forward keystream in-place (encrypt or decrypt — same in CTR).
-    ///
-    /// Used on the **forward** path: client→destination encryption on the client side,
-    /// and forward-direction decryption (layer peeling) on relay nodes.
+    /// Apply the forward keystream in-place.
     pub fn apply_forward(&mut self, data: &mut [u8]) {
         self.forward.apply_keystream(data);
     }
 
-    /// Apply the backward keystream in-place (encrypt or decrypt — same in CTR).
-    ///
-    /// Used on the **backward** path: relay nodes encrypt responses with the backward
-    /// key, and the client decrypts (peels layers) with backward keys.
+    /// Apply the backward keystream in-place.
     pub fn apply_backward(&mut self, data: &mut [u8]) {
         self.backward.apply_keystream(data);
     }
@@ -64,21 +50,12 @@ impl std::fmt::Debug for CipherPair {
 }
 
 /// Running SHA-256 digest for cell integrity verification.
-///
-/// Accumulates every relay cell's contents into a stateful SHA-256 hash.
-/// The sender embeds the first 4 bytes of the current digest snapshot into
-/// the cell's `digest` field. The receiver recomputes the same digest and
-/// compares. A mismatch means the cell was tampered with in transit.
-///
-/// One `RunningDigest` is maintained per direction per circuit endpoint
-/// (client forward, client backward, exit forward, exit backward).
-/// Matching real Tor's "recognized" mechanism (spec section 6.1).
 pub struct RunningDigest {
     state: Sha256,
 }
 
 impl RunningDigest {
-    /// Create a fresh digest state (used after CREATE/CREATED handshake).
+    /// Create a fresh digest state.
     pub fn new() -> Self {
         Self {
             state: Sha256::new(),
@@ -86,15 +63,11 @@ impl RunningDigest {
     }
 
     /// Feed a cell's fields into the running digest and return the 4-byte snapshot.
-    ///
-    /// The caller should embed the returned bytes into the cell's `digest` field
-    /// before encrypting and sending.
     pub fn update(&mut self, stream_id: u16, command: u8, data: &[u8]) -> [u8; 4] {
         self.state.update(stream_id.to_be_bytes());
         self.state.update([command]);
         self.state.update(data);
 
-        // Take a snapshot of the current state (clone — does not reset)
         let snapshot = self.state.clone().finalize();
         let mut tag = [0u8; 4];
         tag.copy_from_slice(snapshot.get(..4).unwrap_or(&[0u8; 4]));
@@ -102,12 +75,6 @@ impl RunningDigest {
     }
 
     /// Verify a cell's digest by recomputing and comparing.
-    ///
-    /// Feeds the cell's fields into the running state (advancing it) and checks
-    /// whether the first 4 bytes match `expected`. Returns `true` on match.
-    ///
-    /// **Important:** This advances the digest state regardless of whether
-    /// verification succeeds — the state must stay in sync with the sender.
     pub fn verify(&mut self, stream_id: u16, command: u8, data: &[u8], expected: [u8; 4]) -> bool {
         let computed = self.update(stream_id, command, data);
         computed == expected
@@ -128,22 +95,20 @@ impl std::fmt::Debug for RunningDigest {
     }
 }
 
-/// Session key for encrypted communication between nodes
-/// Contains separate keys for forward (client to server) and backward (server to client) communication
+/// Session key with separate forward and backward AES-128 keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionKey {
-    pub forward: [u8; 16],  // AES-128 key for forward direction
-    pub backward: [u8; 16], // AES-128 key for backward direction
+    pub forward: [u8; 16],
+    pub backward: [u8; 16],
 }
 
 impl SessionKey {
-    /// Create a new session key from forward and backward keys
+    /// Create a new session key from forward and backward keys.
     pub fn new(forward: [u8; 16], backward: [u8; 16]) -> Self {
         Self { forward, backward }
     }
 
-    /// Create from a single shared key (derive forward and backward)
-    /// This is a simplified approach - in production, use proper KDF
+    /// Create from a single 32-byte shared secret.
     pub fn from_shared(shared: &[u8; 32]) -> Self {
         let mut forward = [0u8; 16];
         let mut backward = [0u8; 16];
@@ -154,7 +119,7 @@ impl SessionKey {
         Self { forward, backward }
     }
 
-    /// Convert to 32-byte array (for storage/transmission)
+    /// Convert to 32-byte array.
     pub fn to_bytes(&self) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes[0..16].copy_from_slice(&self.forward);
@@ -162,7 +127,7 @@ impl SessionKey {
         bytes
     }
 
-    /// Create from 32-byte array
+    /// Create from 32-byte array.
     pub fn from_bytes(bytes: &[u8; 32]) -> Self {
         let mut forward = [0u8; 16];
         let mut backward = [0u8; 16];
@@ -173,7 +138,7 @@ impl SessionKey {
         Self { forward, backward }
     }
 
-    /// Create a zero key (for testing)
+    /// Create a zero key (for testing).
     pub fn zero() -> Self {
         Self {
             forward: [0u8; 16],
@@ -188,22 +153,16 @@ impl Default for SessionKey {
     }
 }
 
-/// Encrypt data using AES-128 in CTR mode
-/// Returns encrypted data (same length as input)
+/// Encrypt data using AES-128-CTR with a random IV prepended.
 pub fn aes_encrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
-    // 1. Generate a random 16-byte IV
     let mut iv = [0u8; 16];
     rand::rng().fill(&mut iv);
 
-    // 2. Initialize cipher with the Key and random IV
     let mut cipher = Aes128Ctr::new(key.into(), &iv.into());
 
-    // 3. Encrypt the data
     let mut ciphertext = data.to_vec();
     cipher.apply_keystream(&mut ciphertext);
 
-    // 4. Prepend the IV to the output
-    // Result format: [IV ... IV | Ciphertext ... Ciphertext]
     let mut output = Vec::with_capacity(16 + ciphertext.len());
     output.extend_from_slice(&iv);
     output.extend_from_slice(&ciphertext);
@@ -211,17 +170,8 @@ pub fn aes_encrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
     output
 }
 
-/// Decrypt data using AES-128 in CTR mode
-/// Returns decrypted data (same length as input)
-/// Note: CTR mode encryption and decryption are the same operation
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - The ciphertext is too short (< 16 bytes)
-/// - The IV cannot be extracted from the data
+/// Decrypt data using AES-128-CTR (IV is the first 16 bytes).
 pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
-    // 1. Validate length (must have at least the IV)
     if data.len() < 16 {
         return Err(anyhow!(
             "Invalid ciphertext: length {} is too short (min 16)",
@@ -229,7 +179,6 @@ pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
         ));
     }
 
-    // 2. Extract the IV (first 16 bytes)
     let iv_slice = data
         .get(0..16)
         .ok_or_else(|| anyhow!("Invalid ciphertext: missing IV (expected 16 bytes)"))?;
@@ -237,23 +186,20 @@ pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
         .get(16..)
         .ok_or_else(|| anyhow!("Invalid ciphertext: missing encrypted data"))?;
 
-    // 3. Initialize cipher with the Key and EXTRACTED IV
     let mut cipher = Aes128Ctr::new(key.into(), iv_slice.into());
 
-    // 4. Decrypt (CTR decryption is the same operation as encryption)
     let mut plaintext = ciphertext.to_vec();
     cipher.apply_keystream(&mut plaintext);
 
     Ok(plaintext)
 }
 
-/// Derive session key from shared secret using SHA-256
-/// Takes a 32-byte shared secret and produces forward/backward keys
+/// Derive session key from a 32-byte shared secret.
 pub fn derive_session_key(shared_secret: &[u8; 32]) -> SessionKey {
     SessionKey::from_shared(shared_secret)
 }
 
-/// Hash data using SHA-256
+/// Hash data using SHA-256.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -264,17 +210,14 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     output
 }
 
-/// Ephemeral key pair for client-side Diffie-Hellman key exchange
-/// Uses X25519 via tor-llcrypto. Should be used once and discarded.
-/// The client generates one ephemeral key pair per circuit hop.
+/// Client-side ephemeral key pair for Diffie-Hellman key exchange.
 pub struct EphemeralKeyPair {
-    /// The public key (safe to share with relay nodes)
     pub public: PublicKey,
     secret: EphemeralSecret,
 }
 
 impl EphemeralKeyPair {
-    /// Generate a new ephemeral keypair (should be used once and discarded)
+    /// Generate a new ephemeral keypair.
     pub fn generate() -> Self {
         let secret = EphemeralSecret::random_from_rng(OsRng);
         let public_x25519 = X25519PublicKey::from(&secret);
@@ -286,9 +229,7 @@ impl EphemeralKeyPair {
         Self { public, secret }
     }
 
-    /// Perform DH exchange with a relay's public key
-    /// Consumes self since ephemeral keys should only be used once
-    /// Returns the shared secret (SHA-256 hashed) that can be used to derive session keys
+    /// Perform DH exchange and return the SHA-256 hashed shared secret.
     pub fn diffie_hellman(self, their_public: &[u8; 32]) -> [u8; 32] {
         let their_public_key = X25519PublicKey::from(*their_public);
         let shared_secret = self.secret.diffie_hellman(&their_public_key);
@@ -304,7 +245,182 @@ impl EphemeralKeyPair {
     }
 }
 
+const PROTOID: &[u8] = b"ntor-curve25519-sha256-1";
+
+fn t_key() -> Vec<u8> {
+    [PROTOID, b":key_extract"].concat()
+}
+
+fn t_verify() -> Vec<u8> {
+    [PROTOID, b":verify"].concat()
+}
+
+fn t_mac() -> Vec<u8> {
+    [PROTOID, b":mac"].concat()
+}
+
+fn m_expand() -> Vec<u8> {
+    [PROTOID, b":key_expand"].concat()
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Compute HMAC-SHA256(data, key).
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+        return [0u8; 32];
+    };
+    mac.update(data);
+    let result = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    out
+}
+
+/// Perform raw X25519 DH (no hashing).
+fn raw_dh_static(secret_bytes: &[u8; 32], their_public: &[u8; 32]) -> [u8; 32] {
+    let secret = StaticSecret::from(*secret_bytes);
+    let their_key = X25519PublicKey::from(*their_public);
+    let shared = secret.diffie_hellman(&their_key);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(shared.as_bytes());
+    out
+}
+
+/// Build `secret_input = exp1 || exp2 || B || X || Y || PROTOID`.
+fn build_secret_input(
+    exp1: &[u8; 32],
+    exp2: &[u8; 32],
+    server_static_pub: &[u8; 32],
+    client_ephemeral_pub: &[u8; 32],
+    server_ephemeral_pub: &[u8; 32],
+) -> Vec<u8> {
+    let mut si = Vec::with_capacity(32 * 5 + PROTOID.len());
+    si.extend_from_slice(exp1);
+    si.extend_from_slice(exp2);
+    si.extend_from_slice(server_static_pub);
+    si.extend_from_slice(client_ephemeral_pub);
+    si.extend_from_slice(server_ephemeral_pub);
+    si.extend_from_slice(PROTOID);
+    si
+}
+
+/// Derive a [`SessionKey`] from a KEY_SEED using HMAC-based key expansion.
+fn expand_key_seed(key_seed: &[u8; 32]) -> SessionKey {
+    let key_material = hmac_sha256(&m_expand(), key_seed);
+    let mut forward = [0u8; 16];
+    let mut backward = [0u8; 16];
+    forward.copy_from_slice(&key_material[..16]);
+    backward.copy_from_slice(&key_material[16..]);
+    SessionKey::new(forward, backward)
+}
+
+/// Server (relay) side of the ntor handshake. Returns `(server_ephemeral_public, auth, session_key)`.
+pub fn ntor_server(
+    static_secret: &[u8; 32],
+    static_public: &[u8; 32],
+    client_ephemeral_pub: &[u8; 32],
+) -> ([u8; 32], [u8; 32], SessionKey) {
+    let y_secret = StaticSecret::random_from_rng(OsRng);
+    let y_public = X25519PublicKey::from(&y_secret);
+    let y_pub_bytes: [u8; 32] = *y_public.as_bytes();
+    let y_secret_bytes = y_secret.to_bytes();
+
+    let exp1 = raw_dh_static(&y_secret_bytes, client_ephemeral_pub);
+    let exp2 = raw_dh_static(static_secret, client_ephemeral_pub);
+
+    let secret_input = build_secret_input(
+        &exp1,
+        &exp2,
+        static_public,
+        client_ephemeral_pub,
+        &y_pub_bytes,
+    );
+
+    let key_seed = hmac_sha256(&t_key(), &secret_input);
+    let verify = hmac_sha256(&t_verify(), &secret_input);
+
+    let mut auth_input = Vec::with_capacity(32 * 4 + PROTOID.len() + 6);
+    auth_input.extend_from_slice(&verify);
+    auth_input.extend_from_slice(static_public);
+    auth_input.extend_from_slice(&y_pub_bytes);
+    auth_input.extend_from_slice(client_ephemeral_pub);
+    auth_input.extend_from_slice(PROTOID);
+    auth_input.extend_from_slice(b"Server");
+
+    let auth = hmac_sha256(&t_mac(), &auth_input);
+    let session_key = expand_key_seed(&key_seed);
+
+    (y_pub_bytes, auth, session_key)
+}
+
+/// Client side of the ntor handshake — verify AUTH and derive the session key.
+pub fn ntor_client_finish_raw(
+    client_ephemeral_secret_bytes: &[u8; 32],
+    client_ephemeral_pub: &[u8; 32],
+    server_static_pub: &[u8; 32],
+    server_ephemeral_pub: &[u8; 32],
+    auth: &[u8; 32],
+) -> Result<SessionKey, crate::TorError> {
+    let exp1 = raw_dh_static(client_ephemeral_secret_bytes, server_ephemeral_pub);
+    let exp2 = raw_dh_static(client_ephemeral_secret_bytes, server_static_pub);
+
+    let secret_input = build_secret_input(
+        &exp1,
+        &exp2,
+        server_static_pub,
+        client_ephemeral_pub,
+        server_ephemeral_pub,
+    );
+
+    let key_seed = hmac_sha256(&t_key(), &secret_input);
+    let verify = hmac_sha256(&t_verify(), &secret_input);
+
+    let mut auth_input = Vec::with_capacity(32 * 4 + PROTOID.len() + 6);
+    auth_input.extend_from_slice(&verify);
+    auth_input.extend_from_slice(server_static_pub);
+    auth_input.extend_from_slice(server_ephemeral_pub);
+    auth_input.extend_from_slice(client_ephemeral_pub);
+    auth_input.extend_from_slice(PROTOID);
+    auth_input.extend_from_slice(b"Server");
+
+    let expected_auth = hmac_sha256(&t_mac(), &auth_input);
+
+    if auth != &expected_auth {
+        return Err(crate::TorError::HandshakeAuthFailed);
+    }
+
+    Ok(expand_key_seed(&key_seed))
+}
+
+/// Client-side ephemeral keypair for the ntor handshake.
+pub struct NtorEphemeralKeyPair {
+    pub public: PublicKey,
+    secret_bytes: [u8; 32],
+}
+
+impl NtorEphemeralKeyPair {
+    /// Generate a new ephemeral keypair for ntor.
+    pub fn generate() -> Self {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public_x25519 = X25519PublicKey::from(&secret);
+        let public = PublicKey {
+            bytes: *public_x25519.as_bytes(),
+        };
+        Self {
+            public,
+            secret_bytes: secret.to_bytes(),
+        }
+    }
+
+    /// Get the raw secret bytes.
+    pub fn secret_bytes(&self) -> &[u8; 32] {
+        &self.secret_bytes
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -542,5 +658,116 @@ mod tests {
         let t1 = d1.update(1, 0x12, b"test");
         let t2 = d2.update(1, 0x12, b"test");
         assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn test_ntor_server_client_roundtrip() {
+        // Simulate relay's static keypair
+        let relay_secret = StaticSecret::random_from_rng(OsRng);
+        let relay_public = X25519PublicKey::from(&relay_secret);
+        let relay_secret_bytes = relay_secret.to_bytes();
+        let relay_public_bytes: [u8; 32] = *relay_public.as_bytes();
+
+        // Client generates ephemeral keypair
+        let client_eph = NtorEphemeralKeyPair::generate();
+        let client_pub = client_eph.public.bytes;
+
+        // Server side
+        let (server_eph_pub, auth, server_key) =
+            ntor_server(&relay_secret_bytes, &relay_public_bytes, &client_pub);
+
+        // Client side — verify AUTH and derive key
+        let client_key = ntor_client_finish_raw(
+            client_eph.secret_bytes(),
+            &client_pub,
+            &relay_public_bytes,
+            &server_eph_pub,
+            &auth,
+        )
+        .unwrap();
+
+        // Both must derive the same session key
+        assert_eq!(server_key, client_key);
+    }
+
+    #[test]
+    fn test_ntor_client_rejects_tampered_auth() {
+        let relay_secret = StaticSecret::random_from_rng(OsRng);
+        let relay_public = X25519PublicKey::from(&relay_secret);
+        let relay_secret_bytes = relay_secret.to_bytes();
+        let relay_public_bytes: [u8; 32] = *relay_public.as_bytes();
+
+        let client_eph = NtorEphemeralKeyPair::generate();
+        let client_pub = client_eph.public.bytes;
+
+        let (server_eph_pub, mut auth, _) =
+            ntor_server(&relay_secret_bytes, &relay_public_bytes, &client_pub);
+
+        // Tamper with the AUTH tag
+        auth[0] ^= 0xFF;
+
+        let result = ntor_client_finish_raw(
+            client_eph.secret_bytes(),
+            &client_pub,
+            &relay_public_bytes,
+            &server_eph_pub,
+            &auth,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ntor_client_rejects_wrong_static_key() {
+        let relay_secret = StaticSecret::random_from_rng(OsRng);
+        let relay_public = X25519PublicKey::from(&relay_secret);
+        let relay_secret_bytes = relay_secret.to_bytes();
+        let relay_public_bytes: [u8; 32] = *relay_public.as_bytes();
+
+        let client_eph = NtorEphemeralKeyPair::generate();
+        let client_pub = client_eph.public.bytes;
+
+        let (server_eph_pub, auth, _) =
+            ntor_server(&relay_secret_bytes, &relay_public_bytes, &client_pub);
+
+        // Client thinks it's talking to a DIFFERENT relay
+        let fake_relay_secret = StaticSecret::random_from_rng(OsRng);
+        let fake_relay_public = X25519PublicKey::from(&fake_relay_secret);
+        let fake_relay_public_bytes: [u8; 32] = *fake_relay_public.as_bytes();
+
+        let result = ntor_client_finish_raw(
+            client_eph.secret_bytes(),
+            &client_pub,
+            &fake_relay_public_bytes,
+            &server_eph_pub,
+            &auth,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ntor_different_sessions_different_keys() {
+        let relay_secret = StaticSecret::random_from_rng(OsRng);
+        let relay_public = X25519PublicKey::from(&relay_secret);
+        let relay_secret_bytes = relay_secret.to_bytes();
+        let relay_public_bytes: [u8; 32] = *relay_public.as_bytes();
+
+        let client_eph1 = NtorEphemeralKeyPair::generate();
+        let client_eph2 = NtorEphemeralKeyPair::generate();
+
+        let (_, _, key1) = ntor_server(
+            &relay_secret_bytes,
+            &relay_public_bytes,
+            &client_eph1.public.bytes,
+        );
+        let (_, _, key2) = ntor_server(
+            &relay_secret_bytes,
+            &relay_public_bytes,
+            &client_eph2.public.bytes,
+        );
+
+        // Different ephemeral keys must produce different session keys
+        assert_ne!(key1, key2);
     }
 }

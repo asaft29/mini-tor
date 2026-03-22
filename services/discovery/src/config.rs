@@ -1,24 +1,17 @@
-//! Discovery service CLI configuration
-//!
-//! Uses Clap derive macros for argument parsing. Previously the service
-//! relied solely on environment variables; this module adds CLI flags
-//! while keeping backwards-compatible defaults.
+//! Discovery service CLI configuration.
 
 use clap::Parser;
 
-/// Tor Directory / Discovery Service
+/// Tor Directory / Discovery Service.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "discovery", about = "Tor-like onion routing discovery service")]
 pub struct DiscoveryConfig {
-    /// Port to listen on
     #[arg(long, default_value = "8080")]
     pub port: u16,
 
-    /// Host/IP to bind to
     #[arg(long, default_value = "0.0.0.0")]
     pub host: String,
 
-    /// Path to the consensus persistence file
     #[arg(
         long,
         env = "CONSENSUS_PATH",
@@ -26,17 +19,14 @@ pub struct DiscoveryConfig {
     )]
     pub consensus_path: String,
 
-    /// Enable the TUI dashboard (disables stdout logging)
     #[arg(long, default_value_t = false)]
     pub tui: bool,
 
-    /// Heartbeat staleness timeout in seconds
     #[arg(long, default_value = "120")]
     pub stale_timeout_secs: u64,
 }
 
 impl DiscoveryConfig {
-    /// Build the bind address string
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }

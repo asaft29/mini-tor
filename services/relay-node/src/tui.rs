@@ -1,8 +1,4 @@
-//! Relay node TUI dashboard
-//!
-//! Renders a live terminal UI showing the relay node type, connection stats,
-//! circuit table, byte counters, and a scrollable activity log of protocol-level
-//! events flowing through the relay (CREATE/EXTEND, relay cells, stream ops).
+//! Relay node TUI dashboard.
 
 use crate::circuit::CircuitRegistry;
 use crate::metrics::{EventKind, RelayMetrics};
@@ -21,15 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// TUI refresh rate
 const TICK_RATE: Duration = Duration::from_millis(200);
 
-/// Run the TUI dashboard until the user quits (q / Ctrl+C)
-///
-/// Returns `Ok(true)` if the user requested shutdown.
-///
-/// # Errors
-/// Returns an error if terminal setup or rendering fails
+/// Run the TUI dashboard until the user quits (q / Ctrl+C).
 pub async fn run_tui(
     metrics: Arc<RelayMetrics>,
     circuit_registry: Arc<Mutex<CircuitRegistry>>,
@@ -59,7 +49,6 @@ pub async fn run_tui(
     result
 }
 
-/// Main event loop
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     metrics: &Arc<RelayMetrics>,
@@ -100,7 +89,6 @@ async fn run_event_loop(
     }
 }
 
-/// Build the header text with global stats
 fn build_header(
     metrics: &RelayMetrics,
     node_type: NodeType,
@@ -132,7 +120,6 @@ fn build_header(
     header
 }
 
-/// Collect events from the ring buffer as formatted Lines
 fn collect_event_lines(metrics: &RelayMetrics) -> Vec<Line<'static>> {
     metrics.events.snapshot(|evt| {
         let ts = format_timestamp(evt.elapsed);
@@ -140,7 +127,6 @@ fn collect_event_lines(metrics: &RelayMetrics) -> Vec<Line<'static>> {
     })
 }
 
-/// Format a single event into a colored Line for the TUI
 fn format_event<'a>(timestamp: &str, kind: &EventKind) -> Line<'a> {
     match kind {
         EventKind::ConnectionAccepted { peer } => Line::from(vec![
@@ -304,7 +290,6 @@ fn format_event<'a>(timestamp: &str, kind: &EventKind) -> Line<'a> {
     }
 }
 
-/// Render the full UI layout
 fn render_ui(frame: &mut Frame, header_text: &str, event_lines: &[Line<'_>], node_type: NodeType) {
     let area = frame.area();
 
@@ -316,7 +301,6 @@ fn render_ui(frame: &mut Frame, header_text: &str, event_lines: &[Line<'_>], nod
     let header_area = chunks.first().copied().unwrap_or(area);
     let events_area = chunks.get(1).copied().unwrap_or(area);
 
-    // Header
     let type_str = match node_type {
         NodeType::Entry => "Entry",
         NodeType::Middle => "Middle",
@@ -331,7 +315,6 @@ fn render_ui(frame: &mut Frame, header_text: &str, event_lines: &[Line<'_>], nod
         .wrap(Wrap { trim: false });
     frame.render_widget(header, header_area);
 
-    // Event log (auto-scroll to bottom)
     let visible_height = events_area.height.saturating_sub(2) as usize;
     let total_events = event_lines.len();
     let skip = total_events.saturating_sub(visible_height);

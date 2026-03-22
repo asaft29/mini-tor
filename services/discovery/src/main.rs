@@ -10,7 +10,6 @@ use tokio::sync::RwLock;
 async fn main() -> anyhow::Result<()> {
     let config = DiscoveryConfig::parse();
 
-    // Set up tracing: when TUI is active, send logs to sink to avoid corrupting display
     if config.tui {
         use tracing_subscriber::fmt::writer::MakeWriterExt;
         tracing_subscriber::fmt()
@@ -47,7 +46,6 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = Arc::new(RwLock::new(registry));
 
-    // Create metrics only when TUI is enabled
     let metrics = if config.tui {
         Some(DiscoveryMetrics::new())
     } else {

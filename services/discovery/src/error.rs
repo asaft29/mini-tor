@@ -5,25 +5,14 @@ use axum::{
 };
 use serde_json::json;
 
-/// Application error types with appropriate HTTP status codes
+/// Application error types with appropriate HTTP status codes.
 #[derive(Debug)]
 pub enum AppError {
-    /// 400 Bad Request - Client sent invalid data
     BadRequest(String),
-
-    /// 404 Not Found - Resource doesn't exist
     NotFound(String),
-
-    /// 409 Conflict - Resource already exists or conflict
     Conflict(String),
-
-    /// 422 Unprocessable Entity - Validation failed
     ValidationError(String),
-
-    /// 500 Internal Server Error - Something went wrong on our side
     InternalError(anyhow::Error),
-
-    /// 503 Service Unavailable - Service temporarily unavailable
     ServiceUnavailable(String),
 }
 
@@ -88,17 +77,15 @@ impl From<std::io::Error> for AppError {
     }
 }
 
-/// Result type alias for handlers
 pub type Result<T> = anyhow::Result<T, AppError>;
 
-/// Helper functions to create specific errors
 impl AppError {
     pub fn validation(msg: impl Into<String>) -> Self {
         AppError::ValidationError(msg.into())
     }
 }
 
-/// Registry-specific errors that map to HTTP status codes
+/// Registry-specific errors that map to HTTP status codes.
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("Node not found: {0}")]

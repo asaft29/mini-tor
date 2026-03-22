@@ -9,19 +9,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
 
-/// Shared application state passed to all Axum handlers
-///
-/// Wraps the node registry (behind `RwLock` for concurrent access)
-/// and the optional TUI metrics (always `Arc` for cheap cloning).
+/// Shared application state for Axum handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// The node registry
     pub registry: Arc<tokio::sync::RwLock<NodeRegistry>>,
-    /// Optional TUI metrics (None when TUI is disabled)
     pub metrics: Option<Arc<DiscoveryMetrics>>,
 }
 
-/// Entry in the node registry with metadata
+/// Entry in the node registry.
 #[derive(Debug, Clone)]
 pub struct NodeEntry {
     pub descriptor: NodeDescriptor,
@@ -39,7 +34,7 @@ impl NodeEntry {
     }
 }
 
-/// Consensus document for disk persistence
+/// Consensus document for disk persistence.
 #[derive(Debug, Serialize, Deserialize)]
 struct Consensus {
     generated_at: chrono::DateTime<chrono::Utc>,
@@ -55,19 +50,14 @@ impl Consensus {
     }
 }
 
+/// Registry statistics snapshot.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RegistryStats {
-    /// Total number of registered nodes
     pub total_nodes: usize,
-    /// Number of entry nodes
     pub entry_count: usize,
-    /// Number of middle nodes
     pub middle_count: usize,
-    /// Number of exit nodes
     pub exit_count: usize,
-    /// Age in seconds of the oldest registered node (None if no nodes)
     pub oldest_node_age_secs: Option<u64>,
-    /// Age in seconds of the newest registered node (None if no nodes)
     pub newest_node_age_secs: Option<u64>,
 }
 
@@ -91,14 +81,13 @@ impl RegistryStats {
     }
 }
 
-/// Node registry - stores all registered relay nodes
+/// Node registry storing all registered relay nodes.
 pub struct NodeRegistry {
     nodes: HashMap<String, NodeEntry>,
     consensus_path: PathBuf,
 }
 
 impl NodeRegistry {
-    /// Create a new node registry
     pub fn new(consensus_path: PathBuf) -> Self {
         Self {
             nodes: HashMap::new(),
@@ -106,10 +95,6 @@ impl NodeRegistry {
         }
     }
 
-    /// Load consensus from disk
-    ///
-    /// # Errors
-    /// Returns an error if the file cannot be read or parsed as JSON.
     pub async fn load(&mut self) -> anyhow::Result<()> {
         if !self.consensus_path.exists() {
             tracing::info!("No consensus file found, starting fresh");
@@ -130,10 +115,6 @@ impl NodeRegistry {
         Ok(())
     }
 
-    /// Save consensus to disk
-    ///
-    /// # Errors
-    /// Returns an error if serialization or file writing fails.
     pub async fn save(&self) -> anyhow::Result<()> {
         let consensus = Consensus::new(chrono::Utc::now(), self.get_all_nodes());
 
@@ -144,10 +125,13 @@ impl NodeRegistry {
         Ok(())
     }
 
-    /// Register a new node or update existing
     pub fn register_node(&mut self, descriptor: NodeDescriptor) {
         let node_id = descriptor.node_id.clone();
+        let addr = descriptor.address;
         let now = Instant::now();
+
+        self.nodes
+            .retain(|id, entry| id == &node_id || entry.descriptor.address != addr);
 
         match self.nodes.contains_key(&node_id) {
             false => {
@@ -165,7 +149,6 @@ impl NodeRegistry {
         }
     }
 
-    /// Get all nodes
     pub fn get_all_nodes(&self) -> Vec<NodeDescriptor> {
         self.nodes
             .values()
@@ -173,7 +156,6 @@ impl NodeRegistry {
             .collect()
     }
 
-    /// Get nodes by type
     pub(crate) fn get_nodes_by_type(&self, node_type: NodeType) -> Vec<NodeDescriptor> {
         self.nodes
             .values()
@@ -182,10 +164,7 @@ impl NodeRegistry {
             .collect()
     }
 
-    /// Get random path for circuit building (always returns 3 nodes: entry, middle, exit)
-    ///
-    /// # Errors
-    /// Returns `InsufficientNodes` if any node type (entry, middle, exit) is missing.
+    /// Get random 3-hop path (entry, middle, exit).
     pub fn get_random_path(&self) -> Result<Vec<NodeDescriptor>, RegistryError> {
         let entry_nodes = self.get_nodes_by_type(NodeType::Entry);
         let middle_nodes = self.get_nodes_by_type(NodeType::Middle);
@@ -215,8 +194,6 @@ impl NodeRegistry {
         Ok(vec![entry, middle, exit])
     }
 
-    /// Select a node using weighted random selection based on bandwidth
-    /// Nodes with higher bandwidth have proportionally higher chance of being selected
     fn select_weighted_node<R: Rng>(
         nodes: &[NodeDescriptor],
         rng: &mut R,
@@ -251,10 +228,6 @@ impl NodeRegistry {
         Ok(first_node.clone())
     }
 
-    /// Update node heartbeat
-    ///
-    /// # Errors
-    /// Returns `NodeNotFound` if no node exists with the given ID.
     pub fn update_heartbeat(&mut self, node_id: &str) -> Result<(), RegistryError> {
         let entry = self
             .nodes
@@ -266,10 +239,6 @@ impl NodeRegistry {
         Ok(())
     }
 
-    /// Remove a node
-    ///
-    /// # Errors
-    /// Returns `NodeNotFound` if no node exists with the given ID.
     pub fn remove_node(&mut self, node_id: &str) -> Result<(), RegistryError> {
         self.nodes
             .remove(node_id)
@@ -279,7 +248,6 @@ impl NodeRegistry {
         Ok(())
     }
 
-    /// Cleanup stale nodes (no heartbeat within timeout)
     pub fn cleanup_stale_nodes(&mut self, timeout: Duration) -> usize {
         let now = Instant::now();
         let before_count = self.nodes.len();
@@ -305,7 +273,6 @@ impl NodeRegistry {
             && !self.get_nodes_by_type(NodeType::Exit).is_empty()
     }
 
-    /// Get statistics
     pub fn get_stats(&self) -> RegistryStats {
         let mut entry_count = 0;
         let mut middle_count = 0;
@@ -358,19 +325,18 @@ mod tests {
     use super::*;
     use common::PublicKey;
 
-    /// Helper: create a NodeDescriptor with minimal boilerplate
     fn make_node(id: &str, node_type: NodeType, bandwidth: u64) -> NodeDescriptor {
+        let port: u16 = 9000 + id.bytes().map(|b| b as u16).sum::<u16>() % 1000;
         NodeDescriptor::new(
             id.to_string(),
             node_type,
-            "127.0.0.1:9001".parse().unwrap(),
+            format!("127.0.0.1:{}", port).parse().unwrap(),
             PublicKey::new([0u8; 32]),
             bandwidth,
             None,
         )
     }
 
-    /// Helper: create a fresh NodeRegistry with a dummy consensus path
     fn make_registry() -> NodeRegistry {
         NodeRegistry::new(PathBuf::from("/tmp/test-consensus.json"))
     }
@@ -511,7 +477,6 @@ mod tests {
         let mut reg = make_registry();
         reg.register_node(make_node("node-1", NodeType::Entry, 1_000_000));
 
-        // Sleep briefly so the heartbeat becomes stale
         std::thread::sleep(Duration::from_millis(50));
 
         let removed = reg.cleanup_stale_nodes(Duration::from_millis(10));
@@ -523,18 +488,14 @@ mod tests {
     fn test_is_ready() {
         let mut reg = make_registry();
 
-        // Empty registry is not ready
         assert!(!reg.is_ready());
 
-        // Only entry — not ready
         reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
         assert!(!reg.is_ready());
 
-        // Entry + middle — not ready
         reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
         assert!(!reg.is_ready());
 
-        // Entry + middle + exit — ready
         reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
         assert!(reg.is_ready());
     }

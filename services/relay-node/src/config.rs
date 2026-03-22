@@ -2,52 +2,42 @@ use clap::Parser;
 use common::{ExitPolicy, NodeType};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-/// Configuration for a relay node
+/// Configuration for a relay node.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "relay-node")]
 #[command(about = "Tor-like relay node", long_about = None)]
 pub struct RelayConfig {
-    /// Type of relay node (entry, middle, exit)
     #[arg(long, value_parser = parse_node_type)]
     pub node_type: NodeType,
 
-    /// Port to bind to
     #[arg(long, default_value = "9001")]
     pub port: u16,
 
-    /// Host address to bind to
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
 
-    /// Directory service URL
     #[arg(long, default_value = "http://localhost:8080")]
     pub directory_url: String,
 
-    /// Bandwidth capacity in bytes per second
-    #[arg(long, default_value = "1048576")] // 1 MB/s default
+    #[arg(long, default_value = "1048576")]
     pub bandwidth: u64,
 
-    /// Heartbeat interval in seconds
     #[arg(long, default_value = "60")]
     pub heartbeat_interval: u64,
 
-    /// Allow exit to all ports (only for exit nodes)
     #[arg(long, default_value = "false")]
     pub exit_allow_all: bool,
 
-    /// Enable TUI dashboard (disables stdout logging)
     #[arg(long, default_value = "false")]
     pub tui: bool,
 }
 
 impl RelayConfig {
-    /// Get the socket address to bind to
     pub fn bind_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
         let ip: IpAddr = self.host.parse()?;
         Ok(SocketAddr::new(ip, self.port))
     }
 
-    /// Get the default exit policy for this node
     pub fn exit_policy(&self) -> Option<ExitPolicy> {
         if self.node_type == NodeType::Exit {
             Some(if self.exit_allow_all {
@@ -76,7 +66,6 @@ impl RelayConfig {
     }
 }
 
-/// Parse node type from string
 fn parse_node_type(s: &str) -> Result<NodeType, String> {
     match s.to_lowercase().as_str() {
         "entry" => Ok(NodeType::Entry),

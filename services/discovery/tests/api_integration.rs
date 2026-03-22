@@ -16,10 +16,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Build a fresh `AppState` (empty registry) with a throwaway consensus path.
 fn fresh_state() -> AppState {
     AppState {
@@ -31,11 +27,13 @@ fn fresh_state() -> AppState {
 }
 
 /// Create a minimal `NodeDescriptor` for testing.
+/// Each (id) gets a unique port to avoid address-based dedup in the registry.
 fn make_node(id: &str, node_type: NodeType, bandwidth: u64) -> NodeDescriptor {
+    let port: u16 = 9000 + id.bytes().map(|b| b as u16).sum::<u16>() % 1000;
     NodeDescriptor::new(
         id.to_string(),
         node_type,
-        "127.0.0.1:9001".parse().unwrap(),
+        format!("127.0.0.1:{}", port).parse().unwrap(),
         PublicKey::new([0u8; 32]),
         bandwidth,
         None,
@@ -72,10 +70,6 @@ async fn register_three_nodes(state: &AppState) {
     register(state, &make_node("middle-1", NodeType::Middle, 2_000_000)).await;
     register(state, &make_node("exit-1", NodeType::Exit, 3_000_000)).await;
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_register_node_success() {

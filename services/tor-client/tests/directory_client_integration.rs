@@ -22,10 +22,6 @@ fn make_node(id: &str, node_type: NodeType) -> NodeDescriptor {
     )
 }
 
-// ---------------------------------------------------------------------------
-// get_random_path tests
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_get_random_path_success() {
     let mock_server = MockServer::start().await;
@@ -106,10 +102,6 @@ async fn test_get_random_path_wrong_count() {
         err_msg
     );
 }
-
-// ---------------------------------------------------------------------------
-// get_all_nodes tests
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_get_all_nodes_success() {

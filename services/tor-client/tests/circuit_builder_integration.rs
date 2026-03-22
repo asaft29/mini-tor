@@ -1,7 +1,7 @@
 //! Integration tests for the Tor circuit builder (`CircuitBuilder`).
 //!
 //! These tests simulate relay nodes using in-process TCP listeners that
-//! perform real Diffie-Hellman key exchange, validating the full telescopic
+//! perform real ntor key exchange, validating the full telescopic
 //! handshake (CREATE + 2 EXTENDs) over loopback.
 //!
 //! The simulated relays use `CipherPair` (stateful AES-CTR with IV=0) to
@@ -15,45 +15,60 @@
     clippy::doc_lazy_continuation
 )]
 
-use common::crypto::{CipherPair, derive_session_key};
+use common::crypto::CipherPair;
 use common::{Message, MessageCommand, NodeDescriptor, NodeType, PublicKey};
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tor_client::circuit::CircuitBuilder;
 use tor_llcrypto::pk::curve25519::{PublicKey as X25519PublicKey, StaticSecret};
 
-/// Simulate a relay DH handshake: given the client's 32-byte public key,
-/// generate a relay keypair, compute the shared secret, and return
-/// (relay_public_bytes, session_key_from_relay_perspective).
-fn relay_dh(client_public: &[u8; 32]) -> ([u8; 32], common::crypto::SessionKey) {
-    let secret = StaticSecret::random_from_rng(OsRng);
-    let public = X25519PublicKey::from(&secret);
-    let relay_public_bytes: [u8; 32] = *public.as_bytes();
+/// A relay's static identity keypair (persists for the relay's lifetime).
+struct RelayIdentity {
+    secret_bytes: [u8; 32],
+    public_bytes: [u8; 32],
+}
 
-    let client_x25519 = X25519PublicKey::from(*client_public);
-    let shared = secret.diffie_hellman(&client_x25519);
+impl RelayIdentity {
+    fn generate() -> Self {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public = X25519PublicKey::from(&secret);
+        Self {
+            secret_bytes: secret.to_bytes(),
+            public_bytes: *public.as_bytes(),
+        }
+    }
+}
 
-    let mut hasher = Sha256::new();
-    hasher.update(shared.as_bytes());
-    let hash = hasher.finalize();
-    let mut key_bytes = [0u8; 32];
-    key_bytes.copy_from_slice(&hash);
+/// Simulate a relay ntor handshake: given the client's 32-byte ephemeral public key
+/// and the relay's static identity, perform the server side of ntor.
+/// Returns (server_ephemeral_pub || auth, session_key).
+fn relay_ntor(
+    client_ephemeral_pub: &[u8; 32],
+    identity: &RelayIdentity,
+) -> ([u8; 64], common::crypto::SessionKey) {
+    let (server_eph_pub, auth, session_key) = common::crypto::ntor_server(
+        &identity.secret_bytes,
+        &identity.public_bytes,
+        client_ephemeral_pub,
+    );
 
-    let session_key = derive_session_key(&key_bytes);
-    (relay_public_bytes, session_key)
+    let mut payload = [0u8; 64];
+    payload[..32].copy_from_slice(&server_eph_pub);
+    payload[32..].copy_from_slice(&auth);
+
+    (payload, session_key)
 }
 
 /// Spawn a simulated entry node that handles:
-/// 1. CREATE -> CREATED  (DH handshake)
+/// 1. CREATE -> CREATED  (ntor handshake)
 /// 2. EXTEND -> connects to next hop, forwards CREATE, receives CREATED,
 ///    encrypts CREATED payload with backward cipher, sends EXTENDED back
 /// 3. Second EXTEND -> decrypts one layer (forward), forwards to middle,
 ///    reads EXTENDED from middle, adds backward layer, sends back
 ///
 /// Uses stateful `CipherPair` matching real relay behavior.
-async fn spawn_entry_relay() -> std::net::SocketAddr {
+async fn spawn_entry_relay(identity: RelayIdentity) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -66,12 +81,12 @@ async fn spawn_entry_relay() -> std::net::SocketAddr {
 
         let mut client_pub = [0u8; 32];
         client_pub.copy_from_slice(&create_msg.data[0..32]);
-        let (relay_pub, session_key) = relay_dh(&client_pub);
+        let (created_payload, session_key) = relay_ntor(&client_pub, &identity);
 
         // Create stateful cipher pair (matches real entry.rs behavior)
         let mut cipher = CipherPair::new(&session_key);
 
-        let created_msg = Message::created(create_msg.circuit_id, relay_pub.to_vec());
+        let created_msg = Message::created(create_msg.circuit_id, created_payload.to_vec());
         stream.write_all(&created_msg.to_bytes()).await.unwrap();
 
         // --- Step 2: Handle first EXTEND (to middle) ---
@@ -139,12 +154,12 @@ async fn spawn_entry_relay() -> std::net::SocketAddr {
 }
 
 /// Spawn a simulated middle node that handles:
-/// 1. CREATE -> CREATED (DH handshake)
+/// 1. CREATE -> CREATED (ntor handshake)
 /// 2. EXTEND -> connects to exit, forwards CREATE, receives CREATED,
 ///    encrypts with backward cipher, sends EXTENDED
 ///
 /// Uses stateful `CipherPair` matching real relay behavior.
-async fn spawn_middle_relay() -> std::net::SocketAddr {
+async fn spawn_middle_relay(identity: RelayIdentity) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -157,12 +172,12 @@ async fn spawn_middle_relay() -> std::net::SocketAddr {
 
         let mut client_pub = [0u8; 32];
         client_pub.copy_from_slice(&create_msg.data[0..32]);
-        let (relay_pub, session_key) = relay_dh(&client_pub);
+        let (created_payload, session_key) = relay_ntor(&client_pub, &identity);
 
         // Create stateful cipher pair (matches real middle.rs behavior)
         let mut cipher = CipherPair::new(&session_key);
 
-        let created_msg = Message::created(create_msg.circuit_id, relay_pub.to_vec());
+        let created_msg = Message::created(create_msg.circuit_id, created_payload.to_vec());
         stream.write_all(&created_msg.to_bytes()).await.unwrap();
 
         // Handle EXTEND (to exit)
@@ -205,8 +220,8 @@ async fn spawn_middle_relay() -> std::net::SocketAddr {
 }
 
 /// Spawn a simulated exit node that handles:
-/// 1. CREATE -> CREATED (DH handshake only)
-async fn spawn_exit_relay() -> std::net::SocketAddr {
+/// 1. CREATE -> CREATED (ntor handshake only)
+async fn spawn_exit_relay(identity: RelayIdentity) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -219,43 +234,47 @@ async fn spawn_exit_relay() -> std::net::SocketAddr {
 
         let mut client_pub = [0u8; 32];
         client_pub.copy_from_slice(&create_msg.data[0..32]);
-        let (relay_pub, _session_key) = relay_dh(&client_pub);
+        let (created_payload, _session_key) = relay_ntor(&client_pub, &identity);
 
-        let created_msg = Message::created(create_msg.circuit_id, relay_pub.to_vec());
+        let created_msg = Message::created(create_msg.circuit_id, created_payload.to_vec());
         stream.write_all(&created_msg.to_bytes()).await.unwrap();
     });
 
     addr
 }
 
-/// Helper: create a `NodeDescriptor` pointing to the given address.
-fn node_at(id: &str, node_type: NodeType, addr: std::net::SocketAddr) -> NodeDescriptor {
-    NodeDescriptor::new(
-        id.to_string(),
-        node_type,
-        addr,
-        PublicKey::new([0u8; 32]), // Public key in descriptor unused by CircuitBuilder
-        1_000_000,
-        None,
-    )
+/// Helper: create a `NodeDescriptor` pointing to the given address with a real public key.
+fn node_at(
+    id: &str,
+    node_type: NodeType,
+    addr: std::net::SocketAddr,
+    public_key: PublicKey,
+) -> NodeDescriptor {
+    NodeDescriptor::new(id.to_string(), node_type, addr, public_key, 1_000_000, None)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 /// Full 3-hop telescopic handshake: CREATE + 2 EXTENDs
 #[tokio::test]
 async fn test_full_telescopic_handshake() {
+    // Generate static identity keypairs for each relay
+    let entry_id = RelayIdentity::generate();
+    let middle_id = RelayIdentity::generate();
+    let exit_id = RelayIdentity::generate();
+
+    // Extract public keys before moving identities into relay tasks
+    let entry_pub = PublicKey::new(entry_id.public_bytes);
+    let middle_pub = PublicKey::new(middle_id.public_bytes);
+    let exit_pub = PublicKey::new(exit_id.public_bytes);
+
     // Spawn simulated relays (order matters: exit first so its address is known)
-    let exit_addr = spawn_exit_relay().await;
-    let middle_addr = spawn_middle_relay().await;
-    let entry_addr = spawn_entry_relay().await;
+    let exit_addr = spawn_exit_relay(exit_id).await;
+    let middle_addr = spawn_middle_relay(middle_id).await;
+    let entry_addr = spawn_entry_relay(entry_id).await;
 
     let path = vec![
-        node_at("entry", NodeType::Entry, entry_addr),
-        node_at("middle", NodeType::Middle, middle_addr),
-        node_at("exit", NodeType::Exit, exit_addr),
+        node_at("entry", NodeType::Entry, entry_addr, entry_pub),
+        node_at("middle", NodeType::Middle, middle_addr, middle_pub),
+        node_at("exit", NodeType::Exit, exit_addr, exit_pub),
     ];
 
     let built = CircuitBuilder::build(42, &path).await.unwrap();
@@ -268,8 +287,6 @@ async fn test_full_telescopic_handshake() {
     );
 
     // Onion keys should be populated (non-zero)
-    // Just check that the keys exist — the DH math is verified by the fact
-    // that the handshake completed without errors
     assert_ne!(built.circuit.onion_keys.entry.forward, [0u8; 16]);
     assert_ne!(built.circuit.onion_keys.middle.forward, [0u8; 16]);
     assert_ne!(built.circuit.onion_keys.exit.forward, [0u8; 16]);
@@ -282,6 +299,7 @@ async fn test_build_rejects_wrong_path_length() {
         "entry",
         NodeType::Entry,
         "127.0.0.1:1".parse().unwrap(),
+        PublicKey::new([0u8; 32]),
     )];
 
     let result = CircuitBuilder::build(1, &path).await;
@@ -304,10 +322,21 @@ async fn test_build_fails_on_unreachable_entry() {
         node_at(
             "entry",
             NodeType::Entry,
-            "127.0.0.1:1".parse().unwrap(), // Unreachable
+            "127.0.0.1:1".parse().unwrap(),
+            PublicKey::new([0u8; 32]),
         ),
-        node_at("middle", NodeType::Middle, "127.0.0.1:2".parse().unwrap()),
-        node_at("exit", NodeType::Exit, "127.0.0.1:3".parse().unwrap()),
+        node_at(
+            "middle",
+            NodeType::Middle,
+            "127.0.0.1:2".parse().unwrap(),
+            PublicKey::new([0u8; 32]),
+        ),
+        node_at(
+            "exit",
+            NodeType::Exit,
+            "127.0.0.1:3".parse().unwrap(),
+            PublicKey::new([0u8; 32]),
+        ),
     ];
 
     let result = CircuitBuilder::build(1, &path).await;

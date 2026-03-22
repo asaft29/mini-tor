@@ -11,22 +11,16 @@ use std::sync::Arc;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
-/// State of a circuit
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum CircuitState {
-    /// Circuit is being established (DH handshake in progress)
     Initializing,
-    /// Circuit is ready for data transfer
     Active,
-    /// Circuit is being torn down
     Closing,
-    /// Circuit is closed
     Closed,
 }
 
-/// Enum representing different circuit handler types
-/// This avoids the need for trait objects and async_trait
+/// Enum-based circuit handler dispatch (no trait objects, no async_trait).
 pub enum CircuitHandler {
     Entry(EntryCircuitHandler),
     Middle(MiddleCircuitHandler),
@@ -34,9 +28,6 @@ pub enum CircuitHandler {
 }
 
 impl CircuitHandler {
-    /// Handle an incoming message on this circuit
-    /// Returns optional response message to send back
-    /// For exit nodes, prev_hop_write must be provided for BEGIN and DATA messages
     pub async fn handle_message(
         &mut self,
         msg: Message,
@@ -51,7 +42,6 @@ impl CircuitHandler {
         }
     }
 
-    /// Get the circuit ID
     #[allow(dead_code)]
     pub fn circuit_id(&self) -> CircuitId {
         match self {
@@ -61,7 +51,6 @@ impl CircuitHandler {
         }
     }
 
-    /// Get the current state
     #[allow(dead_code)]
     pub fn state(&self) -> CircuitState {
         match self {
@@ -71,7 +60,6 @@ impl CircuitHandler {
         }
     }
 
-    /// Get the session key (if established)
     #[allow(dead_code)]
     pub fn session_key(&self) -> Option<&SessionKey> {
         match self {
@@ -81,7 +69,6 @@ impl CircuitHandler {
         }
     }
 
-    /// Close this circuit
     #[allow(dead_code)]
     pub fn close(&mut self) {
         match self {
@@ -91,8 +78,6 @@ impl CircuitHandler {
         }
     }
 
-    /// Handle backward relay cell (data coming back from next hop)
-    /// Re-encrypts with this node's backward key
     pub async fn handle_backward_relay(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         match self {
             CircuitHandler::Entry(handler) => handler.handle_backward_relay(msg).await,
@@ -101,7 +86,6 @@ impl CircuitHandler {
         }
     }
 
-    /// Spawn background task to read from next hop and send backward messages
     pub fn spawn_nexthop_reader(
         &mut self,
         circuit_registry: std::sync::Arc<tokio::sync::Mutex<CircuitRegistry>>,
@@ -120,8 +104,7 @@ impl CircuitHandler {
     }
 }
 
-/// Registry of all circuits handled by this relay node
-/// Unlike the client's CircuitManager, this only tracks local circuit state
+/// Registry of all circuits handled by this relay node.
 pub struct CircuitRegistry {
     circuits: HashMap<CircuitId, CircuitHandler>,
     #[allow(dead_code)]
@@ -129,7 +112,6 @@ pub struct CircuitRegistry {
 }
 
 impl CircuitRegistry {
-    /// Create a new circuit registry
     pub fn new() -> Self {
         Self {
             circuits: HashMap::new(),
@@ -137,7 +119,6 @@ impl CircuitRegistry {
         }
     }
 
-    /// Allocate a new circuit ID
     #[allow(dead_code)]
     pub fn allocate_circuit_id(&mut self) -> CircuitId {
         let id = self.next_circuit_id;
@@ -145,29 +126,24 @@ impl CircuitRegistry {
         id
     }
 
-    /// Add a circuit handler
     pub fn add_circuit(&mut self, circuit_id: CircuitId, handler: CircuitHandler) {
         self.circuits.insert(circuit_id, handler);
     }
 
-    /// Get a mutable reference to a circuit handler
     pub fn get_circuit_mut(&mut self, circuit_id: CircuitId) -> Option<&mut CircuitHandler> {
         self.circuits.get_mut(&circuit_id)
     }
 
-    /// Remove a circuit
     #[allow(dead_code)]
     pub fn remove_circuit(&mut self, circuit_id: CircuitId) -> Option<CircuitHandler> {
         self.circuits.remove(&circuit_id)
     }
 
-    /// Get number of active circuits
     #[allow(dead_code)]
     pub fn circuit_count(&self) -> usize {
         self.circuits.len()
     }
 
-    /// Handle an incoming message (forward direction: from previous hop)
     pub async fn handle_message(
         &mut self,
         msg: Message,
@@ -186,7 +162,6 @@ impl CircuitRegistry {
         }
     }
 
-    /// Handle a backward message (from next hop, needs re-encryption)
     pub async fn handle_backward_message(
         &mut self,
         msg: Message,
@@ -210,7 +185,7 @@ impl Default for CircuitRegistry {
     }
 }
 
-/// Base circuit context shared by all handler types
+/// Base circuit context shared by all handler types.
 #[derive(Debug)]
 pub struct CircuitContext {
     pub circuit_id: CircuitId,
@@ -220,7 +195,6 @@ pub struct CircuitContext {
 }
 
 impl CircuitContext {
-    /// Create a new circuit context
     pub fn new(circuit_id: CircuitId) -> Self {
         Self {
             circuit_id,
@@ -230,14 +204,13 @@ impl CircuitContext {
         }
     }
 
-    /// Mark circuit as active with session key and create stateful cipher pair
+    /// Mark circuit as active with session key and create stateful cipher pair.
     pub fn activate(&mut self, session_key: SessionKey) {
         self.cipher_pair = Some(CipherPair::new(&session_key));
         self.session_key = Some(session_key);
         self.state = CircuitState::Active;
     }
 
-    /// Close the circuit
     pub fn close(&mut self) {
         self.state = CircuitState::Closed;
         self.session_key = None;
@@ -245,8 +218,6 @@ impl CircuitContext {
     }
 }
 
-/// Connection to next hop in the circuit
-/// Split into read and write halves for bidirectional communication
 pub struct NextHop {
     pub write: WriteHalf<TcpStream>,
     pub read: Option<ReadHalf<TcpStream>>,
@@ -261,7 +232,6 @@ impl NextHop {
         }
     }
 
-    /// Take the read half for spawning a background task
     pub fn take_read(&mut self) -> Option<ReadHalf<TcpStream>> {
         self.read.take()
     }
@@ -322,6 +292,5 @@ mod tests {
     fn test_circuit_registry_default() {
         let reg = CircuitRegistry::default();
         assert_eq!(reg.circuit_count(), 0);
-        // Default should behave identically to new()
     }
 }

@@ -42,4 +42,7 @@ pub enum TorError {
 
     #[error("Digest mismatch on circuit {circuit_id} stream {stream_id}")]
     DigestMismatch { circuit_id: u32, stream_id: u16 },
+
+    #[error("ntor handshake AUTH verification failed — possible MITM")]
+    HandshakeAuthFailed,
 }

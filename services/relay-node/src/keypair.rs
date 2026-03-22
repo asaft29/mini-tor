@@ -1,10 +1,9 @@
 use common::PublicKey;
+use common::crypto::SessionKey;
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha256};
 use tor_llcrypto::pk::curve25519::{PublicKey as X25519PublicKey, StaticSecret};
 
-/// A cryptographic key pair for a relay node using Tor's official curve25519 implementation
-/// Uses tor-llcrypto from the Tor Project's arti implementation
+/// X25519 key pair for a relay node (using tor-llcrypto).
 #[derive(Debug, Clone)]
 pub struct KeyPair {
     pub public: PublicKey,
@@ -12,7 +11,6 @@ pub struct KeyPair {
 }
 
 impl KeyPair {
-    /// Generate a new random keypair using X25519
     pub fn generate() -> Self {
         let secret = StaticSecret::random_from_rng(OsRng);
         let public_x25519 = X25519PublicKey::from(&secret);
@@ -29,7 +27,6 @@ impl KeyPair {
         }
     }
 
-    /// Create a keypair from existing secret key bytes
     #[allow(dead_code)]
     pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
         let secret = StaticSecret::from(bytes);
@@ -45,62 +42,51 @@ impl KeyPair {
         }
     }
 
-    /// Get the public key (safe to share)
     pub fn public_key(&self) -> &PublicKey {
         &self.public
     }
 
-    /// Perform Diffie-Hellman key exchange with a client's ephemeral public key
-    /// Returns the shared secret that can be used to derive session keys
-    pub fn diffie_hellman(&self, their_public: &[u8; 32]) -> [u8; 32] {
-        let their_public_key = X25519PublicKey::from(*their_public);
-
-        let secret = StaticSecret::from(self.secret_bytes);
-        let shared_secret = secret.diffie_hellman(&their_public_key);
-
-        let mut hasher = Sha256::new();
-        hasher.update(shared_secret.as_bytes());
-        let result = hasher.finalize();
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&result);
-
-        key
+    /// Perform the ntor server-side handshake, returning (server_ephemeral_pub, auth, session_key).
+    pub fn ntor_server_handshake(
+        &self,
+        client_ephemeral_pub: &[u8; 32],
+    ) -> ([u8; 32], [u8; 32], SessionKey) {
+        common::crypto::ntor_server(&self.secret_bytes, &self.public.bytes, client_ephemeral_pub)
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use common::EphemeralKeyPair;
+    use common::NtorEphemeralKeyPair;
 
     #[test]
-    fn test_diffie_hellman_exchange() {
-        // Relay generates static keypair
+    fn test_ntor_handshake_exchange() {
         let relay_kp = KeyPair::generate();
 
-        // Client generates ephemeral keypair
-        let client_kp = EphemeralKeyPair::generate();
+        let client_kp = NtorEphemeralKeyPair::generate();
+        let client_pub = client_kp.public.bytes;
 
-        // Client sends their public key to relay
-        let client_public = client_kp.public.bytes;
+        let (server_eph_pub, auth, relay_key) = relay_kp.ntor_server_handshake(&client_pub);
 
-        // Relay computes shared secret
-        let relay_shared = relay_kp.diffie_hellman(&client_public);
+        let client_key = common::crypto::ntor_client_finish_raw(
+            client_kp.secret_bytes(),
+            &client_pub,
+            &relay_kp.public.bytes,
+            &server_eph_pub,
+            &auth,
+        )
+        .unwrap();
 
-        // Client computes shared secret
-        let client_shared = client_kp.diffie_hellman(&relay_kp.public.bytes);
-
-        // Both should derive the same shared secret
-        assert_eq!(relay_shared, client_shared);
+        assert_eq!(relay_key, client_key);
     }
 
     #[test]
-    fn test_ephemeral_keypair_generation() {
-        let e1 = EphemeralKeyPair::generate();
-        let e2 = EphemeralKeyPair::generate();
+    fn test_ntor_ephemeral_keypair_generation() {
+        let e1 = NtorEphemeralKeyPair::generate();
+        let e2 = NtorEphemeralKeyPair::generate();
 
-        // Different ephemeral keys each time
         assert_ne!(e1.public.bytes, e2.public.bytes);
     }
 
@@ -111,7 +97,6 @@ mod tests {
         let k1 = KeyPair::from_secret_bytes(secret_bytes);
         let k2 = KeyPair::from_secret_bytes(secret_bytes);
 
-        // Same secret should produce same public key
         assert_eq!(k1.public.bytes, k2.public.bytes);
     }
 }

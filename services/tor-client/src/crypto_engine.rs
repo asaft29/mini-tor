@@ -1,17 +1,6 @@
 use common::crypto::{CipherPair, RunningDigest, SessionKey};
 
-/// Keys for a 3-hop onion circuit
-///
-/// Holds stateful AES-CTR cipher pairs for each hop in the circuit:
-/// - `entry_cipher`: Cipher pair shared with the entry (guard) node
-/// - `middle_cipher`: Cipher pair shared with the middle node
-/// - `exit_cipher`: Cipher pair shared with the exit node
-///
-/// The cipher state is accumulated during the telescopic handshake
-/// (EXTEND messages use the ciphers too) and carries over into DATA
-/// encryption/decryption. This matches real Tor's design.
-///
-/// The raw `SessionKey`s are retained for test assertions only.
+/// Keys for a 3-hop onion circuit.
 pub struct OnionKeys {
     pub entry: SessionKey,
     pub middle: SessionKey,
@@ -19,22 +8,12 @@ pub struct OnionKeys {
     pub entry_cipher: CipherPair,
     pub middle_cipher: CipherPair,
     pub exit_cipher: CipherPair,
-    /// Running digest for forward direction (client -> exit).
-    /// The client embeds a 4-byte snapshot before onion-encrypting each relay cell.
     pub forward_digest: RunningDigest,
-    /// Running digest for backward direction (exit -> client).
-    /// The client verifies the 4-byte snapshot after onion-decrypting each relay cell.
     pub backward_digest: RunningDigest,
 }
 
 impl OnionKeys {
-    /// Create a new set of onion keys with fresh cipher pairs.
-    ///
-    /// **Important:** In production, `entry_cipher`/`middle_cipher`/`exit_cipher`
-    /// should be the same cipher pairs used during the EXTEND handshakes so that
-    /// the keystream state carries over. Use `from_parts()` for that case.
-    /// This constructor creates fresh ciphers (keystream position 0) and is
-    /// mainly useful for tests.
+    /// Create with fresh cipher pairs (for tests).
     pub fn new(entry: SessionKey, middle: SessionKey, exit: SessionKey) -> Self {
         let entry_cipher = CipherPair::new(&entry);
         let middle_cipher = CipherPair::new(&middle);
@@ -51,11 +30,7 @@ impl OnionKeys {
         }
     }
 
-    /// Create from pre-existing cipher pairs (with accumulated handshake state).
-    ///
-    /// This is the production constructor used after the telescopic handshake,
-    /// where the cipher pairs have already been used for EXTEND messages and
-    /// their keystream positions must be preserved.
+    /// Create from pre-existing cipher pairs (preserves handshake state).
     pub fn from_parts(
         entry: SessionKey,
         middle: SessionKey,
@@ -76,29 +51,17 @@ impl OnionKeys {
         }
     }
 
-    /// Apply 3-layer onion encryption in-place (forward direction: client -> destination)
-    ///
-    /// Encryption order: exit.forward, then middle.forward, then entry.forward.
-    /// Each relay peels one layer: entry first, then middle, then exit sees plaintext.
+    /// Apply 3-layer onion encryption in-place (forward direction).
     pub fn onion_encrypt(&mut self, data: &mut [u8]) {
-        // Layer 3: Encrypt with exit key (innermost layer)
         self.exit_cipher.apply_forward(data);
-        // Layer 2: Encrypt with middle key
         self.middle_cipher.apply_forward(data);
-        // Layer 1: Encrypt with entry key (outermost layer)
         self.entry_cipher.apply_forward(data);
     }
 
-    /// Peel 3-layer onion encryption in-place (backward direction: destination -> client)
-    ///
-    /// Decryption order: entry.backward, then middle.backward, then exit.backward.
-    /// Each relay added one layer: exit first, then middle, then entry.
+    /// Peel 3-layer onion encryption in-place (backward direction).
     pub fn onion_decrypt(&mut self, data: &mut [u8]) {
-        // Layer 1: Decrypt entry's backward layer (outermost)
         self.entry_cipher.apply_backward(data);
-        // Layer 2: Decrypt middle's backward layer
         self.middle_cipher.apply_backward(data);
-        // Layer 3: Decrypt exit's backward layer (innermost)
         self.exit_cipher.apply_backward(data);
     }
 }
@@ -302,11 +265,6 @@ mod tests {
         let last_idx = data.len() - 1;
         data[last_idx] ^= 0xFF;
 
-        // Create a fresh client for decryption (CTR mode is stateful, need fresh state
-        // to decrypt what was encrypted at position 0)
-        // Actually, we need a separate "backward" test — this test just verifies
-        // corruption propagates (CTR mode flips the corresponding plaintext bit)
-        // For a proper roundtrip, we'd need relay simulation
         // Just verify the data is different from original plaintext
         assert_ne!(
             data,

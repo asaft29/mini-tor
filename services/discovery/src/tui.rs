@@ -1,8 +1,4 @@
-//! Discovery service TUI dashboard
-//!
-//! Renders a live terminal UI showing the registry status, a node table
-//! with all registered relay nodes, and a scrollable activity log of
-//! API events (registrations, heartbeats, path requests, stale cleanups).
+//! Discovery service TUI dashboard.
 
 use crate::metrics::{DiscoveryMetrics, EventKind};
 use crate::registry::NodeRegistry;
@@ -20,15 +16,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// TUI refresh rate
 const TICK_RATE: Duration = Duration::from_millis(200);
 
-/// Run the TUI dashboard until the user quits (q / Ctrl+C)
-///
-/// Returns `Ok(true)` if the user requested shutdown.
-///
-/// # Errors
-/// Returns an error if terminal setup or rendering fails.
+/// Run the TUI dashboard until the user quits (q / Ctrl+C).
 pub async fn run_tui(
     metrics: Arc<DiscoveryMetrics>,
     registry: Arc<RwLock<NodeRegistry>>,
@@ -50,7 +40,6 @@ pub async fn run_tui(
     result
 }
 
-/// Main event loop
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     metrics: &Arc<DiscoveryMetrics>,
@@ -58,7 +47,6 @@ async fn run_event_loop(
     bind_addr: &str,
 ) -> Result<bool> {
     loop {
-        // Collect data under lock, then release
         let (node_rows, ready, stats) = {
             let reg = registry.read().await;
             let nodes = reg.get_all_nodes();
@@ -68,17 +56,12 @@ async fn run_event_loop(
             let now = Instant::now();
             let rows: Vec<NodeRow> = nodes
                 .iter()
-                .map(|n| {
-                    // We can't get heartbeat age from NodeDescriptor alone —
-                    // but the stats give us aggregate info. For per-node age,
-                    // we use registered_at which is approximate here.
-                    NodeRow {
-                        node_id: truncate_id(&n.node_id, 12),
-                        node_type: format!("{}", n.node_type),
-                        address: n.address.to_string(),
-                        bandwidth: format_bytes(n.bandwidth),
-                        _registered: now,
-                    }
+                .map(|n| NodeRow {
+                    node_id: truncate_id(&n.node_id, 12),
+                    node_type: format!("{}", n.node_type),
+                    address: n.address.to_string(),
+                    bandwidth: format_bytes(n.bandwidth),
+                    _registered: now,
                 })
                 .collect();
 
@@ -113,7 +96,6 @@ async fn run_event_loop(
     }
 }
 
-/// Truncate a node ID for display
 fn truncate_id(id: &str, max_len: usize) -> String {
     if id.len() <= max_len {
         id.to_string()
@@ -123,7 +105,6 @@ fn truncate_id(id: &str, max_len: usize) -> String {
     }
 }
 
-/// A row in the node table
 struct NodeRow {
     node_id: String,
     node_type: String,
@@ -132,7 +113,6 @@ struct NodeRow {
     _registered: Instant,
 }
 
-/// Build the header text with global stats
 fn build_header(
     metrics: &DiscoveryMetrics,
     bind_addr: &str,
@@ -152,7 +132,6 @@ fn build_header(
     )
 }
 
-/// Collect events from the ring buffer as formatted Lines
 fn collect_event_lines(metrics: &DiscoveryMetrics) -> Vec<Line<'static>> {
     metrics.events.snapshot(|evt| {
         let ts = format_timestamp(evt.elapsed);
@@ -160,7 +139,6 @@ fn collect_event_lines(metrics: &DiscoveryMetrics) -> Vec<Line<'static>> {
     })
 }
 
-/// Format a single event into a colored Line for the TUI
 fn format_event<'a>(timestamp: &str, kind: &EventKind) -> Line<'a> {
     match kind {
         EventKind::NodeRegistered {
@@ -253,7 +231,6 @@ fn format_event<'a>(timestamp: &str, kind: &EventKind) -> Line<'a> {
     }
 }
 
-/// Render the full UI layout
 fn render_ui(
     frame: &mut Frame,
     header_text: &str,
@@ -263,13 +240,12 @@ fn render_ui(
 ) {
     let area = frame.area();
 
-    // 3-panel layout: header, node table (40%), event log (60%)
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
-            Constraint::Length(3),      // header
-            Constraint::Percentage(40), // node table
-            Constraint::Percentage(60), // event log
+            Constraint::Length(3),
+            Constraint::Percentage(40),
+            Constraint::Percentage(60),
         ])
         .split(area);
 
@@ -277,7 +253,6 @@ fn render_ui(
     let table_area = chunks.get(1).copied().unwrap_or(area);
     let events_area = chunks.get(2).copied().unwrap_or(area);
 
-    // Header
     let ready_indicator = if ready { "\u{2713}" } else { "\u{2717}" };
     let header = Paragraph::new(header_text.to_string())
         .block(
@@ -288,7 +263,6 @@ fn render_ui(
         .wrap(Wrap { trim: false });
     frame.render_widget(header, header_area);
 
-    // Node table
     let header_row = Row::new(vec![
         Cell::from("ID").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("Type").style(Style::default().add_modifier(Modifier::BOLD)),
@@ -331,7 +305,6 @@ fn render_ui(
     );
     frame.render_widget(table, table_area);
 
-    // Event log (auto-scroll to bottom)
     let visible_height = events_area.height.saturating_sub(2) as usize;
     let total_events = event_lines.len();
     let skip = total_events.saturating_sub(visible_height);

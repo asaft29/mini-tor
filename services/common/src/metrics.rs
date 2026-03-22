@@ -1,31 +1,17 @@
-//! Shared TUI metrics infrastructure
-//!
-//! Provides generic building blocks for all service TUI dashboards:
-//! - `TuiEvent<E>` — timestamped event wrapper (generic over service-specific event kinds)
-//! - `EventBuffer<E>` — capped ring buffer for events
-//! - `Direction` — forward/backward data flow direction
-//! - Formatting helpers for bytes, durations, and timestamps
+//! Shared TUI metrics infrastructure.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// A timestamped event for TUI display
-///
-/// Generic over `E` so each service defines its own `EventKind` enum
-/// while sharing the timing and buffering infrastructure.
+/// Timestamped event for TUI display, generic over service-specific event kinds.
 pub struct TuiEvent<E> {
-    /// Time elapsed since the service started
     pub elapsed: Duration,
-    /// Service-specific event payload
     pub kind: E,
 }
 
-/// Ring buffer for TUI events with a fixed capacity
-///
-/// Thread-safe via internal `Mutex`. When the buffer is full,
-/// the oldest event is dropped to make room for the new one.
+/// Thread-safe ring buffer for TUI events with a fixed capacity.
 pub struct EventBuffer<E> {
     inner: Mutex<EventBufferInner<E>>,
 }
@@ -37,7 +23,7 @@ struct EventBufferInner<E> {
 }
 
 impl<E> EventBuffer<E> {
-    /// Create a new event buffer with the given maximum capacity
+    /// Create a new event buffer with the given maximum capacity.
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(EventBufferInner {
@@ -48,10 +34,7 @@ impl<E> EventBuffer<E> {
         }
     }
 
-    /// Push a new event into the buffer
-    ///
-    /// Automatically timestamps the event relative to the buffer's creation time.
-    /// If the buffer is at capacity, the oldest event is dropped.
+    /// Push a new event, dropping the oldest if at capacity.
     pub fn push(&self, kind: E) {
         if let Ok(mut inner) = self.inner.lock() {
             let elapsed = inner.start_time.elapsed();
@@ -62,9 +45,7 @@ impl<E> EventBuffer<E> {
         }
     }
 
-    /// Take a snapshot of all events currently in the buffer
-    ///
-    /// Returns owned copies so the caller doesn't hold the lock during rendering.
+    /// Snapshot all events via a mapping function (doesn't hold the lock during rendering).
     pub fn snapshot<F, T>(&self, map_fn: F) -> Vec<T>
     where
         F: Fn(&TuiEvent<E>) -> T,
@@ -76,7 +57,6 @@ impl<E> EventBuffer<E> {
         }
     }
 
-    /// Get the number of events currently in the buffer
     pub fn len(&self) -> usize {
         self.inner
             .lock()
@@ -84,12 +64,10 @@ impl<E> EventBuffer<E> {
             .unwrap_or(0)
     }
 
-    /// Check if the buffer is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Get the start time of this buffer (service startup time)
     pub fn start_time(&self) -> Instant {
         self.inner
             .lock()
@@ -98,12 +76,10 @@ impl<E> EventBuffer<E> {
     }
 }
 
-/// Direction of data flow through the network
+/// Direction of data flow through the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// Client → destination (outbound / forward)
     Forward,
-    /// Destination → client (inbound / backward)
     Backward,
 }
 
@@ -116,9 +92,7 @@ impl fmt::Display for Direction {
     }
 }
 
-/// Format a byte count into a human-readable string
-///
-/// Examples: `"0 B"`, `"512 B"`, `"1.2 KB"`, `"3.4 MB"`, `"1.1 GB"`
+/// Format a byte count into a human-readable string.
 pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -135,9 +109,7 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Format a duration into a compact human-readable string
-///
-/// Examples: `"0s"`, `"45s"`, `"2m30s"`, `"1h23m"`, `"2h0m"`
+/// Format a duration into a compact string (e.g. "2m30s").
 pub fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
@@ -149,9 +121,7 @@ pub fn format_duration(d: Duration) -> String {
     }
 }
 
-/// Format a duration as a timestamp offset
-///
-/// Examples: `"+0:00:05"`, `"+0:01:23"`, `"+1:05:12"`
+/// Format a duration as a timestamp offset (e.g. "+0:01:23").
 pub fn format_timestamp(d: Duration) -> String {
     let secs = d.as_secs();
     let h = secs / 3600;

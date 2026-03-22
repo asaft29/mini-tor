@@ -4,7 +4,10 @@ pub mod metrics;
 pub mod protocol;
 pub mod types;
 
-pub use crypto::{CipherPair, EphemeralKeyPair, RunningDigest, SessionKey};
+pub use crypto::{
+    CipherPair, EphemeralKeyPair, NtorEphemeralKeyPair, RunningDigest, SessionKey,
+    ntor_client_finish_raw, ntor_server,
+};
 pub use error::TorError;
 pub use metrics::{
     Direction, EventBuffer, TuiEvent, format_bytes, format_duration, format_timestamp,

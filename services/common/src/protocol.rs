@@ -2,38 +2,33 @@ use crate::error::TorError;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-/// Type aliases for IDs
 pub type CircuitId = u32;
 pub type StreamId = u16;
 
-/// Fixed cell size in bytes (every message on the wire is exactly this size).
-/// Matches real Tor's 514-byte cell size.
+/// Fixed cell size in bytes.
 pub const CELL_SIZE: usize = 514;
 
-/// Header size: Length(4) + CircuitId(4) + StreamId(2) + Command(1) = 11 bytes
+/// Header size: 11 bytes.
 pub const HEADER_SIZE: usize = 11;
 
-/// Size of the payload-length prefix inside the data region (u16 = 2 bytes)
+/// Payload-length prefix size (u16 = 2 bytes).
 pub const PAYLOAD_LEN_SIZE: usize = 2;
 
-/// Size of the running SHA-256 digest field (4 bytes, matching real Tor)
+/// Running SHA-256 digest field size (4 bytes).
 pub const DIGEST_SIZE: usize = 4;
 
-/// Maximum usable payload per cell: CELL_SIZE - HEADER_SIZE - PAYLOAD_LEN_SIZE - DIGEST_SIZE = 497 bytes
+/// Maximum usable payload per cell (497 bytes).
 pub const MAX_PAYLOAD_SIZE: usize = CELL_SIZE - HEADER_SIZE - PAYLOAD_LEN_SIZE - DIGEST_SIZE;
 
-/// Message commands for the Tor protocol
+/// Message commands for the Tor protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum MessageCommand {
-    // Circuit-level commands
     Create = 0x01,
     Created = 0x02,
     Extend = 0x03,
     Extended = 0x04,
     Destroy = 0x05,
-
-    // Stream-level commands
     Begin = 0x10,
     Connected = 0x11,
     Data = 0x12,
@@ -41,10 +36,7 @@ pub enum MessageCommand {
 }
 
 impl MessageCommand {
-    /// Convert from u8 byte value
-    ///
-    /// # Errors
-    /// Returns an error if the byte value doesn't match any known command
+    /// Convert from u8 byte value.
     pub fn from_u8(value: u8) -> Result<Self, String> {
         match value {
             0x01 => Ok(MessageCommand::Create),
@@ -60,7 +52,6 @@ impl MessageCommand {
         }
     }
 
-    /// Convert to u8 byte value
     pub fn to_u8(self) -> u8 {
         self as u8
     }
@@ -82,36 +73,18 @@ impl std::fmt::Display for MessageCommand {
     }
 }
 
-/// Wire protocol message
-///
-/// Fixed-size 514-byte cell layout:
-/// ```text
-/// [Length: 4B | CircuitId: 4B | StreamId: 2B | Command: 1B | PayloadLen: 2B | Digest: 4B | Data+Padding: 497B]
-/// ```
-///
-/// - Length field is always 510 (= 514 - 4), the number of bytes after the length field.
-/// - PayloadLen (u16 BE) stores the actual data size (0..497).
-/// - Digest (4 bytes) is the first 4 bytes of a running SHA-256 snapshot for integrity
-///   verification. Set to `[0; 4]` for handshake messages (CREATE, CREATED, EXTEND, EXTENDED)
-///   which are not digest-protected.
-/// - Data is followed by zero-padding to fill exactly 497 bytes.
-/// - The PayloadLen prefix is critical because raw data (e.g. X25519 keys) may end in 0x00.
+/// Wire protocol message — fixed-size 514-byte cell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    // Routing
     pub circuit_id: CircuitId,
     pub stream_id: StreamId,
-
-    // Content
     pub command: MessageCommand,
     pub data: Vec<u8>,
-
-    // Integrity
     pub digest: [u8; 4],
 }
 
 impl Message {
-    /// Create a new message with digest set to zero (caller must set digest before sending)
+    /// Create a new message with digest set to zero.
     pub fn new(
         circuit_id: CircuitId,
         stream_id: StreamId,
@@ -127,12 +100,12 @@ impl Message {
         }
     }
 
-    /// Create a circuit-level message (stream_id = 0)
+    /// Create a circuit-level message (stream_id = 0).
     pub fn circuit(circuit_id: CircuitId, command: MessageCommand, data: Vec<u8>) -> Self {
         Self::new(circuit_id, 0, command, data)
     }
 
-    /// Create a stream-level message
+    /// Create a stream-level message.
     pub fn stream(
         circuit_id: CircuitId,
         stream_id: StreamId,
@@ -142,99 +115,75 @@ impl Message {
         Self::new(circuit_id, stream_id, command, data)
     }
 
-    // Circuit-level message constructors
-
-    /// Create a CREATE message with public key
     pub fn create(circuit_id: CircuitId, public_key: Vec<u8>) -> Self {
         Self::circuit(circuit_id, MessageCommand::Create, public_key)
     }
 
-    /// Create a CREATED message with public key
     pub fn created(circuit_id: CircuitId, public_key: Vec<u8>) -> Self {
         Self::circuit(circuit_id, MessageCommand::Created, public_key)
     }
 
-    /// Create an EXTEND message with encrypted payload
     pub fn extend(circuit_id: CircuitId, encrypted_payload: Vec<u8>) -> Self {
         Self::circuit(circuit_id, MessageCommand::Extend, encrypted_payload)
     }
 
-    /// Create an EXTENDED message with response data
     pub fn extended(circuit_id: CircuitId, response_data: Vec<u8>) -> Self {
         Self::circuit(circuit_id, MessageCommand::Extended, response_data)
     }
 
-    /// Create a DESTROY message
     pub fn destroy(circuit_id: CircuitId) -> Self {
         Self::circuit(circuit_id, MessageCommand::Destroy, vec![])
     }
 
-    /// Create a BEGIN message with destination address
     pub fn begin(circuit_id: CircuitId, stream_id: StreamId, destination: Vec<u8>) -> Self {
         Self::stream(circuit_id, stream_id, MessageCommand::Begin, destination)
     }
 
-    /// Create a CONNECTED message
     pub fn connected(circuit_id: CircuitId, stream_id: StreamId) -> Self {
         Self::stream(circuit_id, stream_id, MessageCommand::Connected, vec![])
     }
 
-    /// Create a DATA message with payload
     pub fn data(circuit_id: CircuitId, stream_id: StreamId, payload: Vec<u8>) -> Self {
         Self::stream(circuit_id, stream_id, MessageCommand::Data, payload)
     }
 
-    /// Create an END message with optional reason
     pub fn end(circuit_id: CircuitId, stream_id: StreamId, reason: Vec<u8>) -> Self {
         Self::stream(circuit_id, stream_id, MessageCommand::End, reason)
     }
 
-    /// Serialize to fixed-size 514-byte cell.
-    ///
-    /// Layout: `[Length(4) | CircuitId(4) | StreamId(2) | Command(1) | PayloadLen(2) | Digest(4) | Data+Pad(497)]`
-    ///
-    /// If `self.data` exceeds `MAX_PAYLOAD_SIZE` (497), the data is silently truncated.
-    /// Use `write_to_stream()` in production code for a checked version.
+    /// Serialize to fixed-size 514-byte cell. Truncates data exceeding `MAX_PAYLOAD_SIZE`.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut cell = vec![0u8; CELL_SIZE];
 
-        // Byte offset constants for the cell layout
-        const DATA_START: usize = HEADER_SIZE + PAYLOAD_LEN_SIZE + DIGEST_SIZE; // 11+2+4 = 17
+        const DATA_START: usize = HEADER_SIZE + PAYLOAD_LEN_SIZE + DIGEST_SIZE;
 
-        // Length field (4 bytes): always CELL_SIZE - 4 = 510
         let length = (CELL_SIZE - 4) as u32;
         if let Some(s) = cell.get_mut(0..4) {
             s.copy_from_slice(&length.to_be_bytes());
         }
 
-        // Circuit ID (4 bytes)
         if let Some(s) = cell.get_mut(4..8) {
             s.copy_from_slice(&self.circuit_id.to_be_bytes());
         }
 
-        // Stream ID (2 bytes)
         if let Some(s) = cell.get_mut(8..10) {
             s.copy_from_slice(&self.stream_id.to_be_bytes());
         }
 
-        // Command (1 byte)
         if let Some(slot) = cell.get_mut(10) {
             *slot = self.command.to_u8();
         }
 
-        // Payload length (2 bytes) — actual data size (capped at MAX_PAYLOAD_SIZE)
         let data_len = self.data.len().min(MAX_PAYLOAD_SIZE);
         let payload_len = data_len as u16;
         if let Some(s) = cell.get_mut(11..13) {
             s.copy_from_slice(&payload_len.to_be_bytes());
         }
 
-        // Digest (4 bytes)
         if let Some(s) = cell.get_mut(13..17) {
             s.copy_from_slice(&self.digest);
         }
 
-        // Data (up to MAX_PAYLOAD_SIZE bytes) — rest stays zero-padded
         if let Some(dest) = cell.get_mut(DATA_START..DATA_START + data_len)
             && let Some(src) = self.data.get(..data_len)
         {
@@ -245,16 +194,8 @@ impl Message {
     }
 
     /// Deserialize from a fixed-size 514-byte cell.
-    ///
-    /// Reads the 2-byte payload_len prefix and the 4-byte digest field, then
-    /// extracts exactly `payload_len` data bytes, ignoring the zero-padding.
-    ///
-    /// # Errors
-    /// Returns an error if the buffer is too small, the length field is wrong,
-    /// the command byte is invalid, or the payload length exceeds the data region.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        // Byte offset where data starts
-        const DATA_START: usize = HEADER_SIZE + PAYLOAD_LEN_SIZE + DIGEST_SIZE; // 17
+        const DATA_START: usize = HEADER_SIZE + PAYLOAD_LEN_SIZE + DIGEST_SIZE;
 
         if bytes.len() < CELL_SIZE {
             return Err(format!(
@@ -264,7 +205,6 @@ impl Message {
             ));
         }
 
-        // Parse length (4 bytes) — must be 510
         let length_bytes: [u8; 4] = bytes
             .get(0..4)
             .and_then(|s| s.try_into().ok())
@@ -279,25 +219,21 @@ impl Message {
             ));
         }
 
-        // Parse circuit ID (4 bytes)
         let circuit_bytes: [u8; 4] = bytes
             .get(4..8)
             .and_then(|s| s.try_into().ok())
             .ok_or("Incomplete cell: missing circuit ID")?;
         let circuit_id = u32::from_be_bytes(circuit_bytes);
 
-        // Parse stream ID (2 bytes)
         let stream_bytes: [u8; 2] = bytes
             .get(8..10)
             .and_then(|s| s.try_into().ok())
             .ok_or("Incomplete cell: missing stream ID")?;
         let stream_id = u16::from_be_bytes(stream_bytes);
 
-        // Parse command (1 byte)
         let command_byte = bytes.get(10).ok_or("Incomplete cell: missing command")?;
         let command = MessageCommand::from_u8(*command_byte)?;
 
-        // Parse payload length (2 bytes)
         let payload_len_bytes: [u8; 2] = bytes
             .get(11..13)
             .and_then(|s| s.try_into().ok())
@@ -311,13 +247,11 @@ impl Message {
             ));
         }
 
-        // Parse digest (4 bytes)
         let digest_bytes: [u8; 4] = bytes
             .get(13..17)
             .and_then(|s| s.try_into().ok())
             .ok_or("Incomplete cell: missing digest")?;
 
-        // Extract exactly payload_len bytes of data (ignore padding)
         let data = bytes
             .get(DATA_START..DATA_START + payload_len)
             .ok_or("Incomplete cell: data region too short")?
@@ -333,11 +267,6 @@ impl Message {
     }
 
     /// Read a message from a blocking stream.
-    ///
-    /// Reads exactly `CELL_SIZE` (514) bytes, then parses.
-    ///
-    /// # Errors
-    /// Returns IO errors if reading fails or if the cell format is invalid
     pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
         let mut buf = [0u8; CELL_SIZE];
         reader.read_exact(&mut buf)?;
@@ -345,24 +274,17 @@ impl Message {
         Self::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    /// Read a message from an async stream.
-    ///
-    /// Reads exactly `CELL_SIZE` (514) bytes in one shot, then parses.
-    /// Returns `None` if the connection was closed gracefully (EOF on first read).
-    ///
-    /// # Errors
-    /// Returns IO errors if reading fails or if the cell format is invalid
+    /// Read a message from an async stream. Returns `None` on graceful close.
     pub async fn from_stream<S>(stream: &mut S) -> io::Result<Option<Self>>
     where
         S: tokio::io::AsyncReadExt + Unpin,
     {
         let mut buf = [0u8; CELL_SIZE];
 
-        // Read exactly CELL_SIZE bytes; EOF on the very first byte means graceful close
         match stream.read_exact(&mut buf).await {
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                return Ok(None); // Connection closed
+                return Ok(None);
             }
             Err(e) => return Err(e),
         }
@@ -373,13 +295,6 @@ impl Message {
     }
 
     /// Write this message to an async stream as a fixed-size 514-byte cell.
-    ///
-    /// This is the checked production path: it returns `PayloadTooLarge` if
-    /// `self.data.len()` exceeds `MAX_PAYLOAD_SIZE` (501 bytes).
-    ///
-    /// # Errors
-    /// Returns `TorError::PayloadTooLarge` if data exceeds the limit, or an IO error
-    /// if writing fails.
     pub async fn write_to_stream<S>(&self, stream: &mut S) -> Result<(), TorError>
     where
         S: tokio::io::AsyncWriteExt + Unpin,
@@ -396,17 +311,14 @@ impl Message {
         Ok(())
     }
 
-    /// Write a message to a blocking stream as a fixed-size 514-byte cell.
-    ///
-    /// # Errors
-    /// Returns IO errors if writing or flushing fails
+    /// Write a message to a blocking stream.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         let cell = self.to_bytes();
         writer.write_all(&cell)?;
         writer.flush()
     }
 
-    /// Total wire size of a cell (always `CELL_SIZE` = 514 bytes)
+    /// Total wire size (always `CELL_SIZE`).
     pub fn size(&self) -> usize {
         CELL_SIZE
     }

@@ -4,8 +4,7 @@ use reqwest::Client;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
-/// HTTP client for the discovery service API
-/// Fetches node descriptors and random circuit paths
+/// HTTP client for the discovery service API.
 pub struct DirectoryClient {
     http_client: Client,
     directory_url: String,
@@ -18,27 +17,17 @@ pub struct DirectoryClient {
 }
 
 impl DirectoryClient {
-    /// Create a new directory client
-    ///
-    /// # Arguments
-    /// * `directory_url` - Base URL of the discovery service (e.g. `http://localhost:8080`)
     pub fn new(directory_url: String) -> Self {
         Self {
             http_client: Client::new(),
             directory_url,
             cached_nodes: Vec::new(),
             cache_expiry: None,
-            cache_ttl: Duration::from_secs(300), // 5 minutes
+            cache_ttl: Duration::from_secs(300),
         }
     }
 
-    /// Fetch a random 3-node path (entry, middle, exit) from the directory
-    ///
-    /// The discovery service always returns exactly 3 nodes in order:
-    /// `[entry, middle, exit]`
-    ///
-    /// # Errors
-    /// Returns an error if the HTTP request fails or the response is invalid
+    /// Fetch a random 3-node path (entry, middle, exit) from the directory.
     pub async fn get_random_path(&self) -> Result<Vec<NodeDescriptor>> {
         let url = format!("{}/api/nodes/random", self.directory_url);
         debug!("Fetching random path from {}", url);
@@ -81,15 +70,9 @@ impl DirectoryClient {
         Ok(nodes)
     }
 
-    /// Fetch all registered nodes (with caching)
-    ///
-    /// Results are cached for 5 minutes to avoid excessive requests
-    ///
-    /// # Errors
-    /// Returns an error if the HTTP request fails or the response is invalid
+    /// Fetch all registered nodes (cached for 5 minutes).
     #[allow(dead_code)]
     pub async fn get_all_nodes(&mut self) -> Result<Vec<NodeDescriptor>> {
-        // Check cache
         if let Some(expiry) = self.cache_expiry
             && Instant::now() < expiry
         {
@@ -115,7 +98,6 @@ impl DirectoryClient {
             .await
             .context("Failed to parse nodes response")?;
 
-        // Update cache
         self.cached_nodes = response.nodes.clone();
         self.cache_expiry = Some(Instant::now() + self.cache_ttl);
 
@@ -124,7 +106,6 @@ impl DirectoryClient {
         Ok(response.nodes)
     }
 
-    /// Check if the cache is still valid
     #[allow(dead_code)]
     pub fn is_cache_valid(&self) -> bool {
         self.cache_expiry
@@ -133,7 +114,6 @@ impl DirectoryClient {
     }
 }
 
-/// Response wrapper for the `/api/nodes` endpoint
 #[derive(serde::Deserialize)]
 #[allow(dead_code)]
 struct NodesResponse {
@@ -171,7 +151,6 @@ mod tests {
     #[test]
     fn test_cache_expired() {
         let mut client = DirectoryClient::new("http://localhost:8080".to_string());
-        // Set expiry in the past
         client.cache_expiry = Some(Instant::now() - Duration::from_secs(1));
         assert!(!client.is_cache_valid());
     }

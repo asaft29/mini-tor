@@ -2,7 +2,7 @@ use crate::circuit::handler::{CircuitContext, CircuitState, NextHop};
 use crate::keypair::KeyPair;
 use crate::metrics::{EventKind, RelayMetrics};
 use common::{
-    crypto::{SessionKey, derive_session_key},
+    crypto::SessionKey,
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::sync::Arc;
@@ -11,9 +11,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
-/// Middle node circuit handler
-/// Handles the second hop in a circuit
-/// Knows neither the client nor the final destination (only previous and next hop)
+/// Middle node circuit handler — second hop, knows neither client nor destination.
 pub struct MiddleCircuitHandler {
     context: CircuitContext,
     keypair: KeyPair,
@@ -22,7 +20,6 @@ pub struct MiddleCircuitHandler {
 }
 
 impl MiddleCircuitHandler {
-    /// Create a new middle circuit handler
     pub fn new(circuit_id: CircuitId, keypair: KeyPair) -> Self {
         Self {
             context: CircuitContext::new(circuit_id),
@@ -32,13 +29,10 @@ impl MiddleCircuitHandler {
         }
     }
 
-    /// Set optional metrics for TUI event reporting
     pub fn set_metrics(&mut self, metrics: Arc<RelayMetrics>) {
         self.metrics = Some(metrics);
     }
 
-    /// Handle EXTENDED message (response to EXTEND from entry node)
-    /// The entry node has already performed DH with us
     async fn handle_extended(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         info!(
             "Middle: Received EXTENDED for circuit {}",
@@ -64,18 +58,13 @@ impl MiddleCircuitHandler {
         Ok(Some(msg))
     }
 
-    /// Handle EXTEND message (from entry node asking us to extend to exit node)
-    ///
-    /// The EXTEND payload arrives encrypted with our session key (forward direction).
-    /// We decrypt it to get the address and public key, then connect to the next hop.
-    /// The EXTENDED response is encrypted with our backward key before returning.
+    /// Handle EXTEND: decrypt payload, connect to next hop, return EXTENDED.
     async fn handle_extend(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         info!(
             "Middle: Received EXTEND for circuit {}",
             self.context.circuit_id
         );
 
-        // Decrypt the EXTEND payload with our stateful cipher (forward direction)
         let cipher_pair = self
             .context
             .cipher_pair
@@ -151,7 +140,6 @@ impl MiddleCircuitHandler {
             });
         }
 
-        // Encrypt the EXTENDED response with our backward cipher
         let cipher_pair = self
             .context
             .cipher_pair
@@ -167,7 +155,6 @@ impl MiddleCircuitHandler {
         )))
     }
 
-    /// Handle CREATE message (from previous hop establishing circuit with us)
     async fn handle_create(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         info!(
             "Middle: Received CREATE for circuit {}",
@@ -185,8 +172,8 @@ impl MiddleCircuitHandler {
                 .ok_or(anyhow::anyhow!("CREATE message too short"))?,
         );
 
-        let shared_secret = self.keypair.diffie_hellman(&client_public);
-        let session_key = derive_session_key(&shared_secret);
+        let (server_eph_pub, auth, session_key) =
+            self.keypair.ntor_server_handshake(&client_public);
         self.context.activate(session_key.clone());
 
         info!(
@@ -194,15 +181,14 @@ impl MiddleCircuitHandler {
             self.context.circuit_id
         );
 
-        Ok(Some(Message::created(
-            self.context.circuit_id,
-            self.keypair.public_key().bytes.to_vec(),
-        )))
+        let mut payload = Vec::with_capacity(64);
+        payload.extend_from_slice(&server_eph_pub);
+        payload.extend_from_slice(&auth);
+
+        Ok(Some(Message::created(self.context.circuit_id, payload)))
     }
 
-    /// Handle relay cell (encrypted data)
-    /// Decrypt one layer and forward to next hop (forward direction)
-    /// OR encrypt one layer and forward to previous hop (backward direction)
+    /// Peel one forward layer and relay to next hop.
     async fn handle_relay(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         debug!(
             "Middle: Relaying data for circuit {}",
@@ -220,7 +206,7 @@ impl MiddleCircuitHandler {
 
         if let Some(next_hop) = &mut self.next_hop {
             let mut relay_msg = Message::new(msg.circuit_id, msg.stream_id, msg.command, decrypted);
-            relay_msg.digest = msg.digest; // pass through intact for exit to verify
+            relay_msg.digest = msg.digest;
 
             relay_msg.write_to_stream(&mut next_hop.write).await?;
             debug!("Middle: Forwarded relay cell to next hop");
@@ -234,8 +220,7 @@ impl MiddleCircuitHandler {
         Ok(None)
     }
 
-    /// Handle backward relay cell (data coming back from exit node)
-    /// Encrypt one layer and return to previous hop
+    /// Encrypt one backward layer and return to previous hop.
     pub async fn handle_backward_relay(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         debug!(
             "Middle: Handling backward relay for circuit {}",
@@ -252,12 +237,10 @@ impl MiddleCircuitHandler {
         cipher_pair.apply_backward(&mut encrypted);
 
         let mut response = Message::new(msg.circuit_id, msg.stream_id, msg.command, encrypted);
-        response.digest = msg.digest; // pass through intact for client to verify
+        response.digest = msg.digest;
         Ok(Some(response))
     }
 
-    /// Handle an incoming message on this circuit
-    /// Returns optional response message to send back
     pub async fn handle_message(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         match msg.command {
             MessageCommand::Create => self.handle_create(msg).await,
@@ -282,32 +265,26 @@ impl MiddleCircuitHandler {
         }
     }
 
-    /// Get the circuit ID
     #[allow(dead_code)]
     pub fn circuit_id(&self) -> CircuitId {
         self.context.circuit_id
     }
 
-    /// Get the current state
     #[allow(dead_code)]
     pub fn state(&self) -> CircuitState {
         self.context.state
     }
 
-    /// Get the session key (if established)
     #[allow(dead_code)]
     pub fn session_key(&self) -> Option<&SessionKey> {
         self.context.session_key.as_ref()
     }
 
-    /// Close this circuit
     pub fn close(&mut self) {
         self.context.close();
         self.next_hop = None;
     }
 
-    /// Spawn a background task to read responses from next hop (exit node)
-    /// Returns the task handle
     pub fn spawn_nexthop_reader(
         &mut self,
         circuit_registry: Arc<Mutex<crate::circuit::handler::CircuitRegistry>>,
@@ -392,31 +369,51 @@ impl MiddleCircuitHandler {
 mod tests {
     use super::*;
     use crate::circuit::handler::CircuitState;
-    use common::crypto::{CipherPair, EphemeralKeyPair, derive_session_key};
+    use common::crypto::{CipherPair, NtorEphemeralKeyPair, ntor_client_finish_raw};
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
+
+    async fn do_ntor_create(
+        handler: &mut MiddleCircuitHandler,
+        circuit_id: u32,
+        relay_static_pub: &[u8; 32],
+    ) -> (Message, SessionKey) {
+        let client_eph = NtorEphemeralKeyPair::generate();
+        let client_pub = client_eph.public.bytes;
+        let create_msg = Message::create(circuit_id, client_pub.to_vec());
+        let created = handler.handle_create(create_msg).await.unwrap().unwrap();
+
+        assert_eq!(created.data.len(), 64);
+        let mut server_eph_pub = [0u8; 32];
+        server_eph_pub.copy_from_slice(&created.data[0..32]);
+        let mut auth = [0u8; 32];
+        auth.copy_from_slice(&created.data[32..64]);
+
+        let client_key = ntor_client_finish_raw(
+            client_eph.secret_bytes(),
+            &client_pub,
+            relay_static_pub,
+            &server_eph_pub,
+            &auth,
+        )
+        .unwrap();
+
+        (created, client_key)
+    }
 
     #[tokio::test]
     async fn test_middle_create_handshake() {
         let keypair = KeyPair::generate();
         let mut handler = MiddleCircuitHandler::new(10, keypair.clone());
 
-        // Entry node sends CREATE to middle
-        let ephemeral = EphemeralKeyPair::generate();
-        let create_msg = Message::create(10, ephemeral.public.bytes.to_vec());
-
-        let response = handler.handle_create(create_msg).await.unwrap().unwrap();
+        let (response, client_key) =
+            do_ntor_create(&mut handler, 10, &keypair.public_key().bytes).await;
 
         assert_eq!(response.command, MessageCommand::Created);
         assert_eq!(response.circuit_id, 10);
-        assert_eq!(response.data.len(), 32);
+        assert_eq!(response.data.len(), 64);
         assert_eq!(handler.state(), CircuitState::Active);
 
-        // Verify DH produces same key
-        let mut middle_public = [0u8; 32];
-        middle_public.copy_from_slice(&response.data[0..32]);
-        let client_shared = ephemeral.diffie_hellman(&middle_public);
-        let client_key = derive_session_key(&client_shared);
         assert_eq!(client_key, *handler.session_key().unwrap());
     }
 
@@ -435,17 +432,8 @@ mod tests {
         let keypair = KeyPair::generate();
         let mut handler = MiddleCircuitHandler::new(10, keypair.clone());
 
-        // Establish session
-        let ephemeral = EphemeralKeyPair::generate();
-        let create_msg = Message::create(10, ephemeral.public.bytes.to_vec());
-        let created = handler.handle_create(create_msg).await.unwrap().unwrap();
+        let (_, session_key) = do_ntor_create(&mut handler, 10, &keypair.public_key().bytes).await;
 
-        let mut middle_public = [0u8; 32];
-        middle_public.copy_from_slice(&created.data[0..32]);
-        let client_shared = ephemeral.diffie_hellman(&middle_public);
-        let session_key = derive_session_key(&client_shared);
-
-        // Backward DATA from exit
         let plaintext = b"response from exit";
         let backward_msg = Message::data(10, 3, plaintext.to_vec());
 
@@ -458,7 +446,6 @@ mod tests {
         assert_eq!(response.command, MessageCommand::Data);
         assert_eq!(response.stream_id, 3);
 
-        // Should be decryptable with backward key using stateful CipherPair
         let mut client_cipher = CipherPair::new(&session_key);
         let mut decrypted = response.data.clone();
         client_cipher.apply_backward(&mut decrypted);
@@ -480,13 +467,11 @@ mod tests {
         let keypair = KeyPair::generate();
         let mut handler = MiddleCircuitHandler::new(10, keypair.clone());
 
-        // Establish circuit
-        let ephemeral = EphemeralKeyPair::generate();
-        let create_msg = Message::create(10, ephemeral.public.bytes.to_vec());
+        let client_eph = NtorEphemeralKeyPair::generate();
+        let create_msg = Message::create(10, client_eph.public.bytes.to_vec());
         handler.handle_create(create_msg).await.unwrap();
         assert_eq!(handler.state(), CircuitState::Active);
 
-        // Destroy
         let destroy_msg = Message::destroy(10);
         let result = handler.handle_message(destroy_msg).await.unwrap();
         assert!(result.is_none());
@@ -495,47 +480,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_middle_extend_to_exit_over_tcp() {
-        // Set up a fake "exit node" listener
         let exit_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let exit_addr = exit_listener.local_addr().unwrap();
         let exit_keypair = KeyPair::generate();
-        let exit_public = exit_keypair.public_key().bytes;
 
-        // Spawn fake exit node: expects CREATE, responds CREATED
         let exit_kp_clone = exit_keypair.clone();
         let exit_task = tokio::spawn(async move {
             let (mut stream, _) = exit_listener.accept().await.unwrap();
             let msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
             assert_eq!(msg.command, MessageCommand::Create);
-            let created =
-                Message::created(msg.circuit_id, exit_kp_clone.public_key().bytes.to_vec());
+
+            let mut client_pub = [0u8; 32];
+            client_pub.copy_from_slice(&msg.data[0..32]);
+            let (server_eph_pub, auth, _key) = exit_kp_clone.ntor_server_handshake(&client_pub);
+
+            let mut payload = Vec::with_capacity(64);
+            payload.extend_from_slice(&server_eph_pub);
+            payload.extend_from_slice(&auth);
+            let created = Message::created(msg.circuit_id, payload);
             stream.write_all(&created.to_bytes()).await.unwrap();
         });
 
-        // Set up middle handler with session established
         let middle_keypair = KeyPair::generate();
         let mut handler = MiddleCircuitHandler::new(20, middle_keypair.clone());
 
-        let ephemeral_mid = EphemeralKeyPair::generate();
-        let create_msg = Message::create(20, ephemeral_mid.public.bytes.to_vec());
-        let created = handler.handle_create(create_msg).await.unwrap().unwrap();
+        let (_, middle_key) =
+            do_ntor_create(&mut handler, 20, &middle_keypair.public_key().bytes).await;
 
-        let mut mid_public = [0u8; 32];
-        mid_public.copy_from_slice(&created.data[0..32]);
-        let mid_shared = ephemeral_mid.diffie_hellman(&mid_public);
-        let middle_key = derive_session_key(&mid_shared);
-
-        // Build EXTEND payload (for exit): "addr:port\0" + exit public key
-        // Client would encrypt this; entry already decrypted one layer
-        // Middle receives it encrypted with its forward key
-        let ephemeral_exit = EphemeralKeyPair::generate();
+        let ephemeral_exit = NtorEphemeralKeyPair::generate();
         let addr_str = exit_addr.to_string();
         let mut extend_payload = Vec::new();
         extend_payload.extend_from_slice(addr_str.as_bytes());
         extend_payload.push(0);
         extend_payload.extend_from_slice(&ephemeral_exit.public.bytes);
 
-        // Encrypt with middle's forward key using stateful CipherPair (simulating what the client did)
         let mut client_cipher = CipherPair::new(&middle_key);
         let mut encrypted = extend_payload.clone();
         client_cipher.apply_forward(&mut encrypted);
@@ -546,11 +524,25 @@ mod tests {
         assert_eq!(response.command, MessageCommand::Extended);
         assert_eq!(response.circuit_id, 20);
 
-        // Decrypt EXTENDED response with middle's backward key using stateful CipherPair
         let mut decrypted = response.data.clone();
         client_cipher.apply_backward(&mut decrypted);
-        assert_eq!(decrypted.len(), 32);
-        assert_eq!(&decrypted[..], &exit_public);
+        assert_eq!(decrypted.len(), 64);
+
+        let mut exit_eph_pub = [0u8; 32];
+        exit_eph_pub.copy_from_slice(&decrypted[0..32]);
+        let mut auth = [0u8; 32];
+        auth.copy_from_slice(&decrypted[32..64]);
+
+        let exit_key = ntor_client_finish_raw(
+            ephemeral_exit.secret_bytes(),
+            &ephemeral_exit.public.bytes,
+            &exit_keypair.public_key().bytes,
+            &exit_eph_pub,
+            &auth,
+        )
+        .unwrap();
+
+        assert_ne!(exit_key.forward, [0u8; 16]);
 
         exit_task.await.unwrap();
     }

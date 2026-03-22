@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
-/// Node type in the Tor network (from class diagram lines 284-288)
+/// Node type in the Tor network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum NodeType {
     Entry,
@@ -32,7 +32,7 @@ impl std::str::FromStr for NodeType {
     }
 }
 
-/// Public key for a relay node (from class diagram lines 262-264)
+/// X25519 public key for a relay node (32 bytes).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PublicKey {
     pub bytes: [u8; 32],
@@ -47,10 +47,7 @@ impl PublicKey {
         &self.bytes
     }
 
-    /// Create from hex string for testing/debugging
-    ///
-    /// # Errors
-    /// Returns an error if hex string is not 64 characters or contains invalid hex digits
+    /// Create from a 64-character hex string.
     pub fn from_hex(hex: &str) -> Result<Self, String> {
         if hex.len() != 64 {
             return Err("Hex string must be 64 characters (32 bytes)".to_string());
@@ -67,7 +64,6 @@ impl PublicKey {
         Ok(Self { bytes })
     }
 
-    /// Convert to hex string for display/debugging
     pub fn to_hex(&self) -> String {
         self.bytes.iter().map(|b| format!("{:02x}", b)).collect()
     }
@@ -75,11 +71,11 @@ impl PublicKey {
 
 impl std::fmt::Display for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &self.to_hex()[..16]) // Show first 16 chars
+        write!(f, "{}", &self.to_hex()[..16])
     }
 }
 
-/// Exit policy for exit nodes
+/// Exit policy for exit nodes.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExitPolicy {
     pub allowed_ports: Vec<u16>,
@@ -91,17 +87,17 @@ pub struct ExitPolicy {
 }
 
 impl ExitPolicy {
-    /// Default policy: Allow common web ports
+    /// Default policy: allow common web ports.
     pub fn default_policy() -> Self {
         Self {
             allowed_ports: vec![80, 443, 8080, 8443],
-            blocked_ports: vec![25, 587, 465], // Block email ports
+            blocked_ports: vec![25, 587, 465],
             allowed_ips: vec![],
             blocked_ips: vec![],
         }
     }
 
-    /// Allow all ports (permissive policy)
+    /// Allow all ports (permissive policy).
     pub fn allow_all() -> Self {
         Self {
             allowed_ports: vec![],
@@ -111,7 +107,7 @@ impl ExitPolicy {
         }
     }
 
-    /// Check if connection to destination is allowed
+    /// Check if connection to destination is allowed.
     pub fn allows(&self, addr: &SocketAddr) -> bool {
         let port = addr.port();
         let ip = addr.ip();
@@ -136,20 +132,17 @@ impl ExitPolicy {
     }
 }
 
-/// Node descriptor containing all information about a relay node
+/// Node descriptor containing all information about a relay node.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NodeDescriptor {
-    // Identity
     pub node_id: String,
     pub node_type: NodeType,
 
-    // Network
     #[schema(value_type = String, example = "127.0.0.1:9001")]
     pub address: SocketAddr,
     pub public_key: PublicKey,
 
-    // Capabilities
-    pub bandwidth: u64, // bytes per second
+    pub bandwidth: u64,
     pub exit_policy: Option<ExitPolicy>,
 }
 
@@ -172,18 +165,12 @@ impl NodeDescriptor {
         }
     }
 
-    /// Serialize to JSON
-    ///
-    /// # Errors
-    /// Returns a serde_json error if serialization fails
+    /// Serialize to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
-    /// Deserialize from JSON
-    ///
-    /// # Errors
-    /// Returns a serde_json error if JSON is invalid or doesn't match the schema
+    /// Deserialize from JSON.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
@@ -213,22 +200,18 @@ mod tests {
     fn test_exit_policy_allows() {
         let policy = ExitPolicy::default_policy();
 
-        // Should allow HTTP
         let http_addr = "93.184.216.34:80".parse().unwrap();
         assert!(policy.allows(&http_addr));
 
-        // Should allow HTTPS
         let https_addr = "93.184.216.34:443".parse().unwrap();
         assert!(policy.allows(&https_addr));
 
-        // Should block SMTP
         let smtp_addr = "93.184.216.34:25".parse().unwrap();
         assert!(!policy.allows(&smtp_addr));
     }
 
     #[test]
     fn test_exit_policy_ip_filtering() {
-        // Test IP-based filtering
         let mut policy = ExitPolicy::default_policy();
         let blocked_ip: IpAddr = "192.168.1.1".parse().unwrap();
         policy.blocked_ips.push(blocked_ip);
@@ -242,7 +225,6 @@ mod tests {
 
     #[test]
     fn test_exit_policy_allowed_ips() {
-        // Test allowlist - if list is non-empty, only those IPs allowed
         let mut policy = ExitPolicy::default_policy();
         let allowed_ip: IpAddr = "1.1.1.1".parse().unwrap();
         policy.allowed_ips.push(allowed_ip);

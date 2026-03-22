@@ -1,8 +1,4 @@
-//! Tor client TUI dashboard
-//!
-//! Renders a live terminal UI showing circuit pool status, byte counters,
-//! and a scrollable activity log of protocol-level events flowing through
-//! the client (SOCKS5 accepts, circuit builds, BEGIN/CONNECTED/DATA/END).
+//! Tor client TUI dashboard.
 
 use crate::circuit::{CircuitPool, CircuitState};
 use crate::metrics::{ClientMetrics, EventKind};
@@ -20,22 +16,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// TUI refresh rate
 const TICK_RATE: Duration = Duration::from_millis(200);
 
-/// Run the TUI dashboard until the user quits (q / Ctrl+C)
-///
-/// Returns `Ok(true)` if the user pressed q/Ctrl+C (caller should shut down),
-/// `Ok(false)` if the TUI exited for another reason.
-///
-/// # Errors
-/// Returns an error if terminal setup or rendering fails
+/// Run the TUI dashboard until the user quits (q / Ctrl+C).
 pub async fn run_tui(
     metrics: Arc<ClientMetrics>,
     pool: Arc<Mutex<CircuitPool>>,
     socks_addr: String,
 ) -> Result<bool> {
-    // Set up terminal
     enable_raw_mode().context("Failed to enable raw mode")?;
     stdout()
         .execute(EnterAlternateScreen)
@@ -46,14 +34,12 @@ pub async fn run_tui(
 
     let result = run_event_loop(&mut terminal, &metrics, &pool, &socks_addr).await;
 
-    // Restore terminal no matter what
     disable_raw_mode().ok();
     stdout().execute(LeaveAlternateScreen).ok();
 
     result
 }
 
-/// Main event loop — polls keyboard events and redraws on each tick
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     metrics: &Arc<ClientMetrics>,
@@ -61,7 +47,6 @@ async fn run_event_loop(
     socks_addr: &str,
 ) -> Result<bool> {
     loop {
-        // Draw current state
         let circuit_rows = collect_circuit_rows(pool).await;
         let event_lines = collect_event_lines(metrics);
         let header_text = build_header(metrics, socks_addr, &circuit_rows);
@@ -72,7 +57,6 @@ async fn run_event_loop(
             })
             .context("Failed to draw frame")?;
 
-        // Poll for keyboard events (non-blocking with timeout)
         if event::poll(TICK_RATE).context("Failed to poll events")?
             && let Event::Key(key) = event::read().context("Failed to read event")?
             && key.kind == KeyEventKind::Press
@@ -92,7 +76,6 @@ async fn run_event_loop(
     }
 }
 
-/// A single row in the circuit table
 struct CircuitRow {
     circuit_id: String,
     state: String,
@@ -101,7 +84,6 @@ struct CircuitRow {
     path: String,
 }
 
-/// Collect current circuit pool state into display rows
 async fn collect_circuit_rows(pool: &Arc<Mutex<CircuitPool>>) -> Vec<CircuitRow> {
     let pool_guard = pool.lock().await;
     let mut rows = Vec::new();
@@ -131,7 +113,6 @@ async fn collect_circuit_rows(pool: &Arc<Mutex<CircuitPool>>) -> Vec<CircuitRow>
     rows
 }
 
-/// Build the header text with global stats
 fn build_header(metrics: &ClientMetrics, socks_addr: &str, circuits: &[CircuitRow]) -> String {
     let uptime = format_duration(metrics.uptime());
     let ready_count = circuits.iter().filter(|c| c.state == "Ready").count();
@@ -145,7 +126,6 @@ fn build_header(metrics: &ClientMetrics, socks_addr: &str, circuits: &[CircuitRo
     )
 }
 
-/// Collect events from the ring buffer as formatted Lines
 fn collect_event_lines(metrics: &ClientMetrics) -> Vec<Line<'static>> {
     metrics.events.snapshot(|evt| {
         let ts = format_timestamp(evt.elapsed);
@@ -153,7 +133,6 @@ fn collect_event_lines(metrics: &ClientMetrics) -> Vec<Line<'static>> {
     })
 }
 
-/// Format a single event into a colored Line for the TUI
 fn format_event<'a>(timestamp: &str, kind: &EventKind) -> Line<'a> {
     match kind {
         EventKind::CircuitBuilt { circuit_id, path } => Line::from(vec![
@@ -289,7 +268,6 @@ fn format_event<'a>(timestamp: &str, kind: &EventKind) -> Line<'a> {
     }
 }
 
-/// Render the full UI layout
 fn render_ui(
     frame: &mut Frame,
     header_text: &str,
@@ -298,7 +276,6 @@ fn render_ui(
 ) {
     let area = frame.area();
 
-    // Split into 3 vertical chunks: header (3), circuits (40%), events (60%)
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
@@ -312,7 +289,6 @@ fn render_ui(
     let circuit_area = chunks.get(1).copied().unwrap_or(area);
     let events_area = chunks.get(2).copied().unwrap_or(area);
 
-    // Header
     let header = Paragraph::new(header_text.to_string())
         .block(
             Block::default()
@@ -322,7 +298,6 @@ fn render_ui(
         .wrap(Wrap { trim: false });
     frame.render_widget(header, header_area);
 
-    // Circuit table
     let table_header = Row::new(vec![
         Cell::from("CID").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("State").style(Style::default().add_modifier(Modifier::BOLD)),
@@ -359,8 +334,7 @@ fn render_ui(
     );
     frame.render_widget(table, circuit_area);
 
-    // Event log (auto-scroll to bottom)
-    let visible_height = events_area.height.saturating_sub(2) as usize; // minus borders
+    let visible_height = events_area.height.saturating_sub(2) as usize;
     let total_events = event_lines.len();
     let skip = total_events.saturating_sub(visible_height);
 

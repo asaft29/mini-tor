@@ -2,7 +2,7 @@ use crate::circuit::handler::{CircuitContext, CircuitState};
 use crate::keypair::KeyPair;
 use crate::metrics::{EventKind, RelayMetrics};
 use common::{
-    crypto::{CipherPair, RunningDigest, SessionKey, derive_session_key},
+    crypto::{CipherPair, RunningDigest, SessionKey},
     metrics::Direction,
     protocol::{CircuitId, MAX_PAYLOAD_SIZE, Message, MessageCommand, StreamId},
 };
@@ -13,10 +13,8 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-/// Channel for sending data to destination stream
 type DestinationTx = tokio::sync::mpsc::UnboundedSender<Vec<u8>>;
 
-/// Stream state for exit node
 struct ExitStream {
     destination: String,
     dest_tx: DestinationTx,
@@ -24,31 +22,22 @@ struct ExitStream {
 }
 
 /// Combined crypto state for the exit node: cipher pair + running digests.
-/// Lives behind `Arc<Mutex<>>` for shared access between handler methods
-/// and spawned background tasks.
 pub struct ExitCryptoState {
     pub cipher: CipherPair,
     pub forward_digest: RunningDigest,
     pub backward_digest: RunningDigest,
 }
 
-/// Exit node circuit handler
-/// Handles the final hop in a circuit
-/// Connects to the actual destination on behalf of the client
+/// Exit node circuit handler — final hop, connects to the actual destination.
 pub struct ExitCircuitHandler {
     context: CircuitContext,
     keypair: KeyPair,
-    /// Map of stream IDs to stream state
     streams: HashMap<StreamId, ExitStream>,
-    /// Metrics for TUI events (optional — None in tests)
     metrics: Option<Arc<RelayMetrics>>,
-    /// Shared crypto state for concurrent access from handler methods and spawned tasks.
-    /// Created after CREATE handshake, used for all subsequent encrypt/decrypt + digest.
     shared_state: Option<Arc<Mutex<ExitCryptoState>>>,
 }
 
 impl ExitCircuitHandler {
-    /// Create a new exit circuit handler
     pub fn new(circuit_id: CircuitId, keypair: KeyPair) -> Self {
         Self {
             context: CircuitContext::new(circuit_id),
@@ -59,12 +48,10 @@ impl ExitCircuitHandler {
         }
     }
 
-    /// Set the metrics reference for TUI event reporting
     pub fn set_metrics(&mut self, metrics: Arc<RelayMetrics>) {
         self.metrics = Some(metrics);
     }
 
-    /// Handle CREATE message (establishing circuit with middle node)
     async fn handle_create(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         info!(
             "Exit: Received CREATE for circuit {}",
@@ -82,12 +69,10 @@ impl ExitCircuitHandler {
                 .ok_or(anyhow::anyhow!("CREATE message too short"))?,
         );
 
-        let shared_secret = self.keypair.diffie_hellman(&client_public);
-        let session_key = derive_session_key(&shared_secret);
+        let (server_eph_pub, auth, session_key) =
+            self.keypair.ntor_server_handshake(&client_public);
         self.context.activate(session_key.clone());
 
-        // Extract the cipher pair from context and wrap in Arc<Mutex> alongside digest state
-        // for shared access between handler methods and spawned background tasks
         let cipher_pair = self
             .context
             .cipher_pair
@@ -104,13 +89,13 @@ impl ExitCircuitHandler {
             self.context.circuit_id
         );
 
-        Ok(Some(Message::created(
-            self.context.circuit_id,
-            self.keypair.public_key().bytes.to_vec(),
-        )))
+        let mut payload = Vec::with_capacity(64);
+        payload.extend_from_slice(&server_eph_pub);
+        payload.extend_from_slice(&auth);
+
+        Ok(Some(Message::created(self.context.circuit_id, payload)))
     }
 
-    /// Handle BEGIN message (client wants to connect to a destination)
     async fn handle_begin(
         &mut self,
         msg: Message,
@@ -127,13 +112,11 @@ impl ExitCircuitHandler {
             .ok_or_else(|| anyhow::anyhow!("No crypto state established"))?
             .clone();
 
-        // Decrypt BEGIN payload (forward direction) and verify digest
         let mut decrypted = msg.data.clone();
         {
             let mut state = shared_state.lock().await;
             state.cipher.apply_forward(&mut decrypted);
 
-            // Verify the running digest (integrity check)
             if !state.forward_digest.verify(
                 msg.stream_id,
                 msg.command.to_u8(),
@@ -164,10 +147,6 @@ impl ExitCircuitHandler {
                     dest_str, self.context.circuit_id, msg.stream_id
                 );
 
-                // Write CONNECTED response BEFORE spawning the stream task.
-                // This guarantees CONNECTED is the first backward cell for this stream,
-                // preventing a race where the stream task sends DATA cells before CONNECTED.
-                // Hold both locks together (digest+encrypt + write) for atomicity.
                 let connected_msg = Message::connected(self.context.circuit_id, msg.stream_id);
                 let mut encrypted_data = connected_msg.data.clone();
                 {
@@ -220,13 +199,11 @@ impl ExitCircuitHandler {
                     });
                 }
 
-                // CONNECTED already sent directly above
                 Ok(None)
             }
             Err(e) => {
                 error!("Exit: Failed to connect to {}: {}", dest_str, e);
 
-                // Encrypt END response with backward key + embed digest
                 let mut end_data = format!("Connection failed: {}", e).into_bytes();
                 let digest;
                 {
@@ -245,7 +222,6 @@ impl ExitCircuitHandler {
         }
     }
 
-    /// Spawn background tasks for bidirectional stream communication
     fn spawn_stream_tasks(
         &self,
         stream_id: StreamId,
@@ -270,8 +246,6 @@ impl ExitCircuitHandler {
                                 info!("Exit: Destination closed for circuit {} stream {}", circuit_id, stream_id);
 
                                 let mut end_payload = Vec::new();
-                                // Hold both locks together: digest+encrypt and write must be
-                                // atomic to prevent out-of-order cells across concurrent streams
                                 let mut state = shared_state.lock().await;
                                 let digest = state.backward_digest.update(
                                     stream_id,
@@ -303,9 +277,6 @@ impl ExitCircuitHandler {
                                     break;
                                 };
 
-                                // Chunk the data into MAX_PAYLOAD_SIZE pieces and send each as a DATA cell.
-                                // Hold both locks together per chunk: digest+encrypt and write must
-                                // be atomic to prevent out-of-order cells across concurrent streams.
                                 let mut send_failed = false;
                                 for chunk in data_slice.chunks(MAX_PAYLOAD_SIZE) {
                                     let mut encrypted = chunk.to_vec();
@@ -351,7 +322,6 @@ impl ExitCircuitHandler {
                                 error!("Exit: Error reading from destination for circuit {} stream {}: {}", circuit_id, stream_id, e);
 
                                 let mut end_data = format!("Read error: {}", e).into_bytes();
-                                // Hold both locks together for atomicity
                                 let mut state = shared_state.lock().await;
                                 let digest = state.backward_digest.update(
                                     stream_id,
@@ -394,7 +364,6 @@ impl ExitCircuitHandler {
         })
     }
 
-    /// Handle DATA message (relay data to destination)
     async fn handle_data(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         debug!(
             "Exit: Received DATA for circuit {} stream {}",
@@ -407,13 +376,11 @@ impl ExitCircuitHandler {
             .ok_or_else(|| anyhow::anyhow!("No crypto state established"))?
             .clone();
 
-        // Decrypt DATA payload (forward direction) and verify digest
         let mut decrypted = msg.data.clone();
         {
             let mut state = shared_state.lock().await;
             state.cipher.apply_forward(&mut decrypted);
 
-            // Verify the running digest (integrity check)
             if !state.forward_digest.verify(
                 msg.stream_id,
                 msg.command.to_u8(),
@@ -491,12 +458,8 @@ impl ExitCircuitHandler {
         }
     }
 
-    /// Handle END message (close a stream)
-    ///
-    /// MUST decrypt and verify the forward digest even though the payload is
-    /// typically empty — this keeps the running digest in sync with the client.
-    /// Without this, every completed stream causes a permanent desync and all
-    /// subsequent BEGIN/DATA messages on the circuit fail verification.
+    /// Handle END message. MUST decrypt and verify forward digest even for empty
+    /// payloads to keep the running digest in sync with the client.
     async fn handle_end(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         info!(
             "Exit: Received END for circuit {} stream {}",
@@ -509,7 +472,6 @@ impl ExitCircuitHandler {
             .ok_or_else(|| anyhow::anyhow!("No crypto state established"))?
             .clone();
 
-        // Decrypt and verify forward digest (keeps digest in sync with client)
         let mut decrypted = msg.data.clone();
         {
             let mut state = shared_state.lock().await;
@@ -545,7 +507,6 @@ impl ExitCircuitHandler {
             });
         }
 
-        // Send backward END response
         let mut encrypted_data = Vec::new();
         let digest;
         {
@@ -562,8 +523,6 @@ impl ExitCircuitHandler {
         Ok(Some(response))
     }
 
-    /// Handle an incoming message on this circuit
-    /// Returns optional response message to send back
     pub async fn handle_message(
         &mut self,
         msg: Message,
@@ -593,25 +552,21 @@ impl ExitCircuitHandler {
         }
     }
 
-    /// Get the circuit ID
     #[allow(dead_code)]
     pub fn circuit_id(&self) -> CircuitId {
         self.context.circuit_id
     }
 
-    /// Get the current state
     #[allow(dead_code)]
     pub fn state(&self) -> CircuitState {
         self.context.state
     }
 
-    /// Get the session key (if established)
     #[allow(dead_code)]
     pub fn session_key(&self) -> Option<&SessionKey> {
         self.context.session_key.as_ref()
     }
 
-    /// Close this circuit and all streams
     pub fn close(&mut self) {
         self.context.close();
         self.streams.clear();
@@ -624,26 +579,36 @@ impl ExitCircuitHandler {
 mod tests {
     use super::*;
     use crate::circuit::handler::CircuitState;
-    use common::crypto::{CipherPair, EphemeralKeyPair, RunningDigest, derive_session_key};
+    use common::crypto::{CipherPair, NtorEphemeralKeyPair, RunningDigest, ntor_client_finish_raw};
     use tokio::net::TcpListener;
 
-    /// Helper: establish a session between client ephemeral key and exit handler,
-    /// returning the client-side session key, cipher pair, running digest, and exit public key.
     async fn setup_exit_handler(
         handler: &mut ExitCircuitHandler,
-    ) -> (SessionKey, CipherPair, RunningDigest, [u8; 32]) {
-        let ephemeral = EphemeralKeyPair::generate();
-        let client_public = ephemeral.public.bytes;
-        let create_msg = Message::create(handler.circuit_id(), client_public.to_vec());
+        relay_static_pub: &[u8; 32],
+    ) -> (SessionKey, CipherPair, RunningDigest) {
+        let client_eph = NtorEphemeralKeyPair::generate();
+        let client_pub = client_eph.public.bytes;
+        let create_msg = Message::create(handler.circuit_id(), client_pub.to_vec());
 
         let created = handler.handle_create(create_msg).await.unwrap().unwrap();
-        let mut exit_public = [0u8; 32];
-        exit_public.copy_from_slice(&created.data[0..32]);
-        let shared = ephemeral.diffie_hellman(&exit_public);
-        let key = derive_session_key(&shared);
+        assert_eq!(created.data.len(), 64);
+
+        let mut server_eph_pub = [0u8; 32];
+        server_eph_pub.copy_from_slice(&created.data[0..32]);
+        let mut auth = [0u8; 32];
+        auth.copy_from_slice(&created.data[32..64]);
+
+        let key = ntor_client_finish_raw(
+            client_eph.secret_bytes(),
+            &client_pub,
+            relay_static_pub,
+            &server_eph_pub,
+            &auth,
+        )
+        .unwrap();
         let cipher = CipherPair::new(&key);
         let digest = RunningDigest::new();
-        (key, cipher, digest, exit_public)
+        (key, cipher, digest)
     }
 
     #[tokio::test]
@@ -651,20 +616,29 @@ mod tests {
         let keypair = KeyPair::generate();
         let mut handler = ExitCircuitHandler::new(100, keypair.clone());
 
-        let ephemeral = EphemeralKeyPair::generate();
-        let create_msg = Message::create(100, ephemeral.public.bytes.to_vec());
+        let client_eph = NtorEphemeralKeyPair::generate();
+        let client_pub = client_eph.public.bytes;
+        let create_msg = Message::create(100, client_pub.to_vec());
         let response = handler.handle_create(create_msg).await.unwrap().unwrap();
 
         assert_eq!(response.command, MessageCommand::Created);
         assert_eq!(response.circuit_id, 100);
-        assert_eq!(response.data.len(), 32);
+        assert_eq!(response.data.len(), 64);
         assert_eq!(handler.state(), CircuitState::Active);
 
-        // Verify DH key agreement
-        let mut exit_public = [0u8; 32];
-        exit_public.copy_from_slice(&response.data[0..32]);
-        let client_shared = ephemeral.diffie_hellman(&exit_public);
-        let client_key = derive_session_key(&client_shared);
+        let mut server_eph_pub = [0u8; 32];
+        server_eph_pub.copy_from_slice(&response.data[0..32]);
+        let mut auth = [0u8; 32];
+        auth.copy_from_slice(&response.data[32..64]);
+
+        let client_key = ntor_client_finish_raw(
+            client_eph.secret_bytes(),
+            &client_pub,
+            &keypair.public_key().bytes,
+            &server_eph_pub,
+            &auth,
+        )
+        .unwrap();
         assert_eq!(client_key, *handler.session_key().unwrap());
     }
 
@@ -682,10 +656,9 @@ mod tests {
     async fn test_exit_data_unknown_stream_returns_end() {
         let keypair = KeyPair::generate();
         let mut handler = ExitCircuitHandler::new(100, keypair.clone());
-        let (_session_key, mut client_cipher, mut client_digest, _) =
-            setup_exit_handler(&mut handler).await;
+        let (_session_key, mut client_cipher, mut client_digest) =
+            setup_exit_handler(&mut handler, &keypair.public_key().bytes).await;
 
-        // Send DATA for a stream that doesn't exist (with valid digest)
         let plaintext = b"hello";
         let digest = client_digest.update(99, MessageCommand::Data.to_u8(), plaintext);
         let mut encrypted_data = plaintext.to_vec();
@@ -699,7 +672,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Should return END with "Stream not found"
         assert_eq!(response.command, MessageCommand::End);
         assert_eq!(response.stream_id, 99);
         let mut decrypted = response.data.clone();
@@ -715,10 +687,9 @@ mod tests {
     async fn test_exit_end_unknown_stream() {
         let keypair = KeyPair::generate();
         let mut handler = ExitCircuitHandler::new(100, keypair.clone());
-        let (_session_key, mut client_cipher, mut client_digest, _) =
-            setup_exit_handler(&mut handler).await;
+        let (_session_key, mut client_cipher, mut client_digest) =
+            setup_exit_handler(&mut handler, &keypair.public_key().bytes).await;
 
-        // Send END for unknown stream with valid forward digest + encryption
         let plaintext: &[u8] = &[];
         let digest = client_digest.update(55, MessageCommand::End.to_u8(), plaintext);
         let mut encrypted = plaintext.to_vec();
@@ -740,7 +711,7 @@ mod tests {
     async fn test_exit_destroy_clears_streams() {
         let keypair = KeyPair::generate();
         let mut handler = ExitCircuitHandler::new(100, keypair.clone());
-        let (_, _, _, _) = setup_exit_handler(&mut handler).await;
+        let (_, _, _) = setup_exit_handler(&mut handler, &keypair.public_key().bytes).await;
 
         assert_eq!(handler.state(), CircuitState::Active);
         assert!(handler.shared_state.is_some());
@@ -754,23 +725,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_begin_connects_to_destination() {
-        // Set up a fake destination server
         let dest_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dest_addr = dest_listener.local_addr().unwrap();
 
-        // Spawn destination that accepts and does nothing (just stays alive briefly)
         let dest_task = tokio::spawn(async move {
             let (_stream, _) = dest_listener.accept().await.unwrap();
-            // Keep connection alive for test
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         });
 
         let keypair = KeyPair::generate();
         let mut handler = ExitCircuitHandler::new(100, keypair.clone());
-        let (_session_key, mut client_cipher, mut client_digest, _) =
-            setup_exit_handler(&mut handler).await;
+        let (_session_key, mut client_cipher, mut client_digest) =
+            setup_exit_handler(&mut handler, &keypair.public_key().bytes).await;
 
-        // We need a prev_hop connection for BEGIN — the exit writes CONNECTED directly
         let prev_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let prev_addr = prev_listener.local_addr().unwrap();
         let prev_connect =
@@ -780,7 +747,6 @@ mod tests {
         let (_prev_read, prev_write) = tokio::io::split(prev_server);
         let prev_hop_write = Arc::new(Mutex::new(prev_write));
 
-        // Build BEGIN payload: "host:port\0" encrypted with forward key + digest
         let dest_str = format!("{}\0", dest_addr);
         let plaintext = dest_str.as_bytes();
         let digest = client_digest.update(1, MessageCommand::Begin.to_u8(), plaintext);
@@ -789,7 +755,6 @@ mod tests {
         let mut begin_msg = Message::begin(100, 1, encrypted_dest);
         begin_msg.digest = digest;
 
-        // handle_begin now writes CONNECTED directly and returns Ok(None)
         let response = handler
             .handle_message(begin_msg, Some(prev_hop_write))
             .await
@@ -799,7 +764,6 @@ mod tests {
             "handle_begin should return None (writes CONNECTED directly)"
         );
 
-        // Read the CONNECTED response from the TCP connection (written directly by handle_begin)
         let connected = Message::from_stream(&mut prev_client)
             .await
             .unwrap()
@@ -808,10 +772,8 @@ mod tests {
         assert_eq!(connected.circuit_id, 100);
         assert_eq!(connected.stream_id, 1);
 
-        // CONNECTED data is encrypted with backward key — decrypt with client cipher
         let mut decrypted = connected.data.clone();
         client_cipher.apply_backward(&mut decrypted);
-        // CONNECTED data is empty (from Message::connected)
         assert!(decrypted.is_empty());
 
         dest_task.await.unwrap();
@@ -821,10 +783,9 @@ mod tests {
     async fn test_exit_begin_unreachable_destination() {
         let keypair = KeyPair::generate();
         let mut handler = ExitCircuitHandler::new(100, keypair.clone());
-        let (_session_key, mut client_cipher, mut client_digest, _) =
-            setup_exit_handler(&mut handler).await;
+        let (_session_key, mut client_cipher, mut client_digest) =
+            setup_exit_handler(&mut handler, &keypair.public_key().bytes).await;
 
-        // prev_hop write half
         let prev_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let prev_addr = prev_listener.local_addr().unwrap();
         let prev_connect =
@@ -834,8 +795,7 @@ mod tests {
         let (_prev_read, prev_write) = tokio::io::split(prev_server);
         let prev_hop_write = Arc::new(Mutex::new(prev_write));
 
-        // Try to connect to an address that should refuse connections
-        let dest_str = "127.0.0.1:1\0"; // port 1 is very unlikely to be open
+        let dest_str = "127.0.0.1:1\0";
         let plaintext = dest_str.as_bytes();
         let digest = client_digest.update(2, MessageCommand::Begin.to_u8(), plaintext);
         let mut encrypted_dest = plaintext.to_vec();
@@ -849,7 +809,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Should return END with connection failure reason
         assert_eq!(response.command, MessageCommand::End);
         assert_eq!(response.stream_id, 2);
     }
