@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>Tor Discovery Service</title>
+    <link data-trunk rel="rust" data-wasm-opt="z"/>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --surface2: #1c2128;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --green: #3fb950;
+            --yellow: #d29922;
+            --red: #f85149;
+            --blue: #58a6ff;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 14px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 24px 16px;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 20px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 20px;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        h1 {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--blue);
+            letter-spacing: 0.03em;
+        }
+
+        .header-stats {
+            display: flex;
+            gap: 14px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .stat {
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        .stat strong {
+            color: var(--text);
+        }
+
+        .badge {
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        }
+
+        .badge-ready {
+            background: rgba(63, 185, 80, 0.15);
+            color: var(--green);
+            border: 1px solid rgba(63, 185, 80, 0.35);
+        }
+
+        .badge-not-ready {
+            background: rgba(248, 81, 73, 0.15);
+            color: var(--red);
+            border: 1px solid rgba(248, 81, 73, 0.35);
+        }
+
+        .section-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 10px;
+        }
+
+        .node-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .node-table th {
+            text-align: left;
+            padding: 10px 16px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface2);
+        }
+
+        .node-table td {
+            padding: 11px 16px;
+            border-bottom: 1px solid rgba(48, 54, 61, 0.6);
+            font-size: 13px;
+        }
+
+        .node-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .node-table tbody tr:hover td {
+            background: rgba(255, 255, 255, 0.025);
+        }
+
+        .right { text-align: right; }
+
+        .mono {
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        .type-badge {
+            display: inline-block;
+            padding: 2px 9px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+        }
+
+        .type-entry  { background: rgba(63,185,80,0.15);  color: var(--green); }
+        .type-middle { background: rgba(210,153,34,0.15); color: var(--yellow); }
+        .type-exit   { background: rgba(248,81,73,0.15);  color: var(--red); }
+
+        .empty-row td {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 36px !important;
+            font-style: italic;
+        }
+
+        .footer {
+            margin-top: 16px;
+            font-size: 11px;
+            color: var(--text-muted);
+            text-align: right;
+        }
+
+        /* ── Activity Log ─────────────────────────────────────── */
+
+        .log-panel {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 0;
+            max-height: 320px;
+            overflow-y: auto;
+            font-size: 12px;
+        }
+
+        .log-row {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            padding: 4px 16px;
+            border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+        }
+
+        .log-row:last-child { border-bottom: none; }
+        .log-row:hover { background: rgba(255,255,255,0.02); }
+
+        .log-time {
+            color: var(--text-muted);
+            font-family: 'Courier New', Courier, monospace;
+            min-width: 72px;
+            flex-shrink: 0;
+            font-size: 11px;
+        }
+
+        .log-label {
+            font-weight: 700;
+            font-family: 'Courier New', Courier, monospace;
+            min-width: 110px;
+            flex-shrink: 0;
+            font-size: 11px;
+            letter-spacing: 0.02em;
+        }
+
+        .log-detail {
+            color: var(--text-muted);
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .log-empty {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 24px;
+            font-style: italic;
+        }
+
+        .log-count {
+            font-weight: 400;
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        /* event type colours */
+        .ev-register  { color: var(--green); }
+        .ev-remove    { color: var(--red); }
+        .ev-heartbeat { color: #56d3e0; }  /* cyan */
+        .ev-path      { color: var(--yellow); }
+        .ev-cleanup   { color: var(--text-muted); }
+        .ev-stats     { color: var(--blue); }
+        .ev-health    { color: var(--blue); }
+        .ev-error     { color: var(--red); }
+
+        /* stat-sep: node type counts with slightly tighter grouping */
+        .stat-sep {
+            color: var(--text-muted);
+            font-size: 12px;
+            padding: 0 4px;
+            border-left: 1px solid var(--border);
+            border-right: 1px solid var(--border);
+        }
+        .stat-sep strong { color: var(--text); }
+    </style>
+</head>
+<body></body>
+</html>

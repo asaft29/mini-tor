@@ -23,8 +23,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/nodes/{id}", delete(handlers::remove_node))
         .route("/api/stats", get(handlers::get_stats))
+        .route("/api/dashboard", get(handlers::dashboard_handler))
         .with_state(state)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .fallback(handlers::serve_asset)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
 }

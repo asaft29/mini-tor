@@ -37,6 +37,9 @@ pub enum MessageCommand {
 
 impl MessageCommand {
     /// Convert from u8 byte value.
+    ///
+    /// # Errors
+    /// Returns an error string if `value` does not match a known command byte.
     pub fn from_u8(value: u8) -> Result<Self, String> {
         match value {
             0x01 => Ok(MessageCommand::Create),
@@ -194,6 +197,10 @@ impl Message {
     }
 
     /// Deserialize from a fixed-size 514-byte cell.
+    ///
+    /// # Errors
+    /// Returns an error string if `bytes` is shorter than `CELL_SIZE` or contains
+    /// an unrecognised command byte.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         const DATA_START: usize = HEADER_SIZE + PAYLOAD_LEN_SIZE + DIGEST_SIZE;
 
@@ -267,6 +274,9 @@ impl Message {
     }
 
     /// Read a message from a blocking stream.
+    ///
+    /// # Errors
+    /// Returns an I/O error on read failure or if the cell bytes are malformed.
     pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
         let mut buf = [0u8; CELL_SIZE];
         reader.read_exact(&mut buf)?;
@@ -275,6 +285,9 @@ impl Message {
     }
 
     /// Read a message from an async stream. Returns `None` on graceful close.
+    ///
+    /// # Errors
+    /// Returns an I/O error on read failure or if the cell bytes are malformed.
     pub async fn from_stream<S>(stream: &mut S) -> io::Result<Option<Self>>
     where
         S: tokio::io::AsyncReadExt + Unpin,
@@ -295,6 +308,10 @@ impl Message {
     }
 
     /// Write this message to an async stream as a fixed-size 514-byte cell.
+    ///
+    /// # Errors
+    /// Returns [`TorError::PayloadTooLarge`] if `data` exceeds `MAX_PAYLOAD_SIZE`,
+    /// or an I/O error on write failure.
     pub async fn write_to_stream<S>(&self, stream: &mut S) -> Result<(), TorError>
     where
         S: tokio::io::AsyncWriteExt + Unpin,
@@ -312,6 +329,9 @@ impl Message {
     }
 
     /// Write a message to a blocking stream.
+    ///
+    /// # Errors
+    /// Returns an I/O error on write failure.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         let cell = self.to_bytes();
         writer.write_all(&cell)?;

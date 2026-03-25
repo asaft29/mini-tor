@@ -31,12 +31,17 @@ impl CircuitInfo {
 
 /// Client-specific event types for the TUI activity log.
 pub enum EventKind {
-    CircuitBuilt { circuit_id: CircuitId, path: String },
+    CircuitBuilt {
+        circuit_id: CircuitId,
+        path: String,
+    },
     CircuitReplaced {
         old_id: CircuitId,
         new_id: CircuitId,
     },
-    CircuitClosed { circuit_id: CircuitId },
+    CircuitClosed {
+        circuit_id: CircuitId,
+    },
     Socks5Accept {
         addr: SocketAddr,
         destination: String,
@@ -60,7 +65,9 @@ pub enum EventKind {
         circuit_id: CircuitId,
         stream_id: StreamId,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Aggregate metrics for the Tor client TUI.

@@ -46,11 +46,9 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = Arc::new(RwLock::new(registry));
 
-    let metrics = if config.tui {
-        Some(DiscoveryMetrics::new())
-    } else {
-        None
-    };
+    // Metrics are always created — TUI uses them for terminal display,
+    // the web dashboard uses them for the /api/dashboard endpoint.
+    let metrics = Some(DiscoveryMetrics::new());
 
     let state = AppState {
         registry: registry.clone(),

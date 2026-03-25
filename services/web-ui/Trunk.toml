@@ -1,0 +1,3 @@
+[build]
+dist = "../discovery/web-dist"
+public_url = "/"

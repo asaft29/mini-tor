@@ -171,6 +171,9 @@ pub fn aes_encrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
 }
 
 /// Decrypt data using AES-128-CTR (IV is the first 16 bytes).
+///
+/// # Errors
+/// Returns an error if `data` is shorter than 16 bytes (the IV size).
 pub fn aes_decrypt(data: &[u8], key: &[u8; 16]) -> anyhow::Result<Vec<u8>> {
     if data.len() < 16 {
         return Err(anyhow!(
@@ -355,6 +358,9 @@ pub fn ntor_server(
 }
 
 /// Client side of the ntor handshake — verify AUTH and derive the session key.
+///
+/// # Errors
+/// Returns [`TorError::HandshakeAuthFailed`] if the relay's AUTH tag does not verify.
 pub fn ntor_client_finish_raw(
     client_ephemeral_secret_bytes: &[u8; 32],
     client_ephemeral_pub: &[u8; 32],

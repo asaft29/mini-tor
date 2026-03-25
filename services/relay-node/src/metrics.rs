@@ -10,14 +10,22 @@ const EVENT_BUFFER_CAPACITY: usize = 200;
 
 /// Relay-specific event types for the TUI activity log.
 pub enum EventKind {
-    ConnectionAccepted { peer: String },
-    ConnectionClosed { peer: String },
-    CircuitCreated { circuit_id: CircuitId },
+    ConnectionAccepted {
+        peer: String,
+    },
+    ConnectionClosed {
+        peer: String,
+    },
+    CircuitCreated {
+        circuit_id: CircuitId,
+    },
     CircuitExtended {
         circuit_id: CircuitId,
         next_hop: String,
     },
-    CircuitDestroyed { circuit_id: CircuitId },
+    CircuitDestroyed {
+        circuit_id: CircuitId,
+    },
     RelayForward {
         circuit_id: CircuitId,
         command: MessageCommand,
@@ -43,7 +51,9 @@ pub enum EventKind {
         bytes: usize,
         direction: Direction,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Aggregate metrics for the relay node TUI.

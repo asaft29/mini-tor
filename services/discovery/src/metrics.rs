@@ -14,13 +14,23 @@ pub enum EventKind {
         node_type: String,
         address: String,
     },
-    NodeRemoved { node_id: String },
-    Heartbeat { node_id: String },
+    NodeRemoved {
+        node_id: String,
+    },
+    Heartbeat {
+        node_id: String,
+    },
     PathRequested,
-    StaleCleanup { removed: usize },
+    StaleCleanup {
+        removed: usize,
+    },
     StatsQueried,
-    HealthCheck { ready: bool },
-    Error { message: String },
+    HealthCheck {
+        ready: bool,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Aggregate metrics for the discovery service TUI.

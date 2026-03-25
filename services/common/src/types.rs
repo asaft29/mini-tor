@@ -48,6 +48,9 @@ impl PublicKey {
     }
 
     /// Create from a 64-character hex string.
+    ///
+    /// # Errors
+    /// Returns an error string if `hex` is not exactly 64 characters or contains non-hex digits.
     pub fn from_hex(hex: &str) -> Result<Self, String> {
         if hex.len() != 64 {
             return Err("Hex string must be 64 characters (32 bytes)".to_string());
@@ -166,11 +169,17 @@ impl NodeDescriptor {
     }
 
     /// Serialize to JSON.
+    ///
+    /// # Errors
+    /// Returns a serde error if serialization fails (should not happen for this type).
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
     /// Deserialize from JSON.
+    ///
+    /// # Errors
+    /// Returns a serde error if `json` is malformed or missing required fields.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
