@@ -7,7 +7,10 @@ use simple_socks5::{ATYP, Socks5};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tor_client::circuit::{CircuitPool, CircuitState, spawn_circuit_reader};
+use tor_client::circuit::{
+    CircuitPool, CircuitState, spawn_circuit_keepalive, spawn_circuit_monitor,
+    spawn_circuit_reader,
+};
 use tor_client::config::TorClientConfig;
 use tor_client::directory_client::DirectoryClient;
 use tor_client::metrics::{ClientMetrics, EventKind};
@@ -45,6 +48,9 @@ async fn main() -> Result<()> {
     }
 
     let pool = Arc::new(Mutex::new(pool));
+
+    spawn_circuit_monitor(Arc::clone(&pool), Arc::clone(&metrics), std::time::Duration::from_secs(5));
+    spawn_circuit_keepalive(Arc::clone(&pool), std::time::Duration::from_secs(5));
 
     let mut server = Socks5::bind(&config.socks_addr)
         .await

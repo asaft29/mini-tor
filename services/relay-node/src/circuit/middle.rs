@@ -6,7 +6,7 @@ use common::{
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::sync::Arc;
-use tokio::io::WriteHalf;
+use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
@@ -255,6 +255,7 @@ impl MiddleCircuitHandler {
                 self.close();
                 Ok(None)
             }
+            MessageCommand::Padding => Ok(None),
             _ => {
                 error!(
                     "Middle: Unexpected command {:?} for circuit {}",
@@ -355,6 +356,12 @@ impl MiddleCircuitHandler {
                         break;
                     }
                 }
+            }
+            // Downstream (exit) closed — send DESTROY upstream toward entry then shut down.
+            {
+                let mut writer = prev_hop_write.lock().await;
+                let _ = Message::destroy(circuit_id).write_to_stream(&mut *writer).await;
+                let _ = writer.shutdown().await;
             }
             info!(
                 "Middle: Background reader task terminated for circuit {}",

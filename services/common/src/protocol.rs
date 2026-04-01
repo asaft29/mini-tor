@@ -24,6 +24,7 @@ pub const MAX_PAYLOAD_SIZE: usize = CELL_SIZE - HEADER_SIZE - PAYLOAD_LEN_SIZE -
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum MessageCommand {
+    Padding = 0x00,
     Create = 0x01,
     Created = 0x02,
     Extend = 0x03,
@@ -42,6 +43,7 @@ impl MessageCommand {
     /// Returns an error string if `value` does not match a known command byte.
     pub fn from_u8(value: u8) -> Result<Self, String> {
         match value {
+            0x00 => Ok(MessageCommand::Padding),
             0x01 => Ok(MessageCommand::Create),
             0x02 => Ok(MessageCommand::Created),
             0x03 => Ok(MessageCommand::Extend),
@@ -63,6 +65,7 @@ impl MessageCommand {
 impl std::fmt::Display for MessageCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            MessageCommand::Padding => write!(f, "PADDING"),
             MessageCommand::Create => write!(f, "CREATE"),
             MessageCommand::Created => write!(f, "CREATED"),
             MessageCommand::Extend => write!(f, "EXTEND"),
@@ -136,6 +139,10 @@ impl Message {
 
     pub fn destroy(circuit_id: CircuitId) -> Self {
         Self::circuit(circuit_id, MessageCommand::Destroy, vec![])
+    }
+
+    pub fn padding(circuit_id: CircuitId) -> Self {
+        Self::circuit(circuit_id, MessageCommand::Padding, vec![])
     }
 
     pub fn begin(circuit_id: CircuitId, stream_id: StreamId, destination: Vec<u8>) -> Self {

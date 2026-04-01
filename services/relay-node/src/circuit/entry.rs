@@ -6,7 +6,7 @@ use common::{
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::sync::Arc;
-use tokio::io::WriteHalf;
+use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
@@ -228,6 +228,7 @@ impl EntryCircuitHandler {
                 self.close();
                 Ok(None)
             }
+            MessageCommand::Padding => Ok(None),
             _ => {
                 error!(
                     "Entry: Unexpected command {:?} for circuit {}",
@@ -274,6 +275,7 @@ impl EntryCircuitHandler {
         );
 
         Some(tokio::spawn(async move {
+            let mut destroy_sent = false;
             loop {
                 match Message::from_stream(&mut read_half).await {
                     Ok(Some(msg)) => {
@@ -281,6 +283,15 @@ impl EntryCircuitHandler {
                             "Entry: Received backward message from next hop for circuit {}",
                             circuit_id
                         );
+
+                        // DESTROY from middle — propagate upstream to client and shut down.
+                        if msg.command == MessageCommand::Destroy {
+                            let mut writer = client_write.lock().await;
+                            let _ = Message::destroy(circuit_id).write_to_stream(&mut *writer).await;
+                            let _ = writer.shutdown().await;
+                            destroy_sent = true;
+                            break;
+                        }
 
                         let backward_command = msg.command;
                         let backward_bytes = msg.data.len();
@@ -325,6 +336,12 @@ impl EntryCircuitHandler {
                         break;
                     }
                 }
+            }
+            // Downstream (middle) closed without DESTROY — notify client and shut down.
+            if !destroy_sent {
+                let mut writer = client_write.lock().await;
+                let _ = Message::destroy(circuit_id).write_to_stream(&mut *writer).await;
+                let _ = writer.shutdown().await;
             }
             info!(
                 "Entry: Background reader task terminated for circuit {}",

@@ -620,6 +620,15 @@ pub fn spawn_circuit_reader(
                 circuit_id, msg.command, msg.stream_id
             );
 
+            // DESTROY from entry — relay teardown signal, no decryption needed.
+            if msg.command == MessageCommand::Destroy {
+                let mut circuit_guard = circuit.lock().await;
+                circuit_guard.state = CircuitState::Closed;
+                circuit_guard.stream_senders.clear();
+                metrics.push_event(EventKind::CircuitClosed { circuit_id });
+                break;
+            }
+
             let mut circuit_guard = circuit.lock().await;
 
             let mut decrypted_data = msg.data;
@@ -679,6 +688,85 @@ pub fn spawn_circuit_reader(
         }
 
         info!("Circuit reader terminated for circuit {}", circuit_id);
+    })
+}
+
+/// Polls the pool every `check_interval` and rebuilds any circuit in `Closed` state.
+pub fn spawn_circuit_monitor(
+    pool: Arc<Mutex<CircuitPool>>,
+    metrics: Arc<ClientMetrics>,
+    check_interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(check_interval).await;
+
+            let failed_ids: Vec<CircuitId> = {
+                let g = pool.lock().await;
+                let mut ids = Vec::new();
+                for (&id, c) in g.iter_circuits() {
+                    if c.lock().await.state == CircuitState::Closed {
+                        ids.push(id);
+                    }
+                }
+                ids
+            };
+
+            for failed_id in failed_ids {
+                info!("Circuit monitor: replacing closed circuit {}", failed_id);
+                let mut g = pool.lock().await;
+                match g.replace_circuit(failed_id).await {
+                    Ok((new_circuit, read_half)) => {
+                        drop(g);
+                        spawn_circuit_reader(new_circuit, read_half, Arc::clone(&metrics));
+                        info!("Circuit monitor: replacement built successfully");
+                    }
+                    Err(e) => {
+                        error!(
+                            "Circuit monitor: failed to replace circuit {}: {}",
+                            failed_id, e
+                        );
+                        metrics.push_event(EventKind::Error {
+                            message: format!("Monitor replace failed: {e}"),
+                        });
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Sends a PADDING cell to the entry node on every `Ready` circuit every `interval`.
+/// A write failure means the entry is dead; the circuit monitor will detect and rebuild.
+pub fn spawn_circuit_keepalive(
+    pool: Arc<Mutex<CircuitPool>>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+
+            // Collect Arc clones first so we don't hold the pool lock during writes.
+            let circuits: Vec<Arc<Mutex<Circuit>>> = {
+                let g = pool.lock().await;
+                g.iter_circuits().map(|(_, c)| Arc::clone(c)).collect()
+            };
+
+            for arc in circuits {
+                let c = arc.lock().await;
+                if c.state == CircuitState::Ready {
+                    let msg = Message::padding(c.circuit_id);
+                    let mut w = c.entry_writer.lock().await;
+                    if let Err(e) = msg.write_to_stream(&mut *w).await {
+                        debug!(
+                            "Keepalive write failed for circuit {}: {}",
+                            c.circuit_id, e
+                        );
+                        // circuit_monitor will detect the Closed state and rebuild
+                    }
+                }
+            }
+        }
     })
 }
 

@@ -542,6 +542,7 @@ impl ExitCircuitHandler {
                 self.close();
                 Ok(None)
             }
+            MessageCommand::Padding => Ok(None),
             _ => {
                 error!(
                     "Exit: Unexpected command {:?} for circuit {}",
