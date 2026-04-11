@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use common::crypto::{CipherPair, NtorEphemeralKeyPair, SessionKey, ntor_client_finish_raw};
 use common::metrics::Direction;
 use common::{CELL_SIZE, CircuitId, Message, MessageCommand, NodeDescriptor, StreamId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -103,14 +103,14 @@ pub struct BuiltCircuit {
     pub read_half: ReadHalf<TcpStream>,
 }
 
-/// Builds a 3-hop circuit via telescopic ntor handshake.
+/// Builds an N-hop circuit (N >= 3) via telescopic ntor handshake.
 pub struct CircuitBuilder;
 
 impl CircuitBuilder {
     pub async fn build(circuit_id: CircuitId, path: &[NodeDescriptor]) -> Result<BuiltCircuit> {
-        if path.len() != 3 {
+        if path.len() < 3 {
             return Err(anyhow::anyhow!(
-                "Circuit path must have exactly 3 nodes, got {}",
+                "Circuit path must have at least 3 nodes, got {}",
                 path.len()
             ));
         }
@@ -118,16 +118,15 @@ impl CircuitBuilder {
         let entry = path
             .first()
             .ok_or_else(|| anyhow::anyhow!("Missing entry node"))?;
-        let middle = path
-            .get(1)
-            .ok_or_else(|| anyhow::anyhow!("Missing middle node"))?;
-        let exit = path
-            .get(2)
-            .ok_or_else(|| anyhow::anyhow!("Missing exit node"))?;
 
         info!(
-            "Building circuit {}: {} -> {} -> {}",
-            circuit_id, entry.address, middle.address, exit.address
+            "Building {}-hop circuit {}: {}",
+            path.len(),
+            circuit_id,
+            path.iter()
+                .map(|n| n.address.to_string())
+                .collect::<Vec<_>>()
+                .join(" -> ")
         );
 
         let mut entry_stream = TcpStream::connect(entry.address)
@@ -135,46 +134,33 @@ impl CircuitBuilder {
             .context("Failed to connect to entry node")?;
         info!("Connected to entry node at {}", entry.address);
 
+        // CREATE handshake with entry (hop 0).
         let entry_key = Self::handshake_create(circuit_id, &mut entry_stream, entry).await?;
-        let mut entry_cipher = CipherPair::new(&entry_key);
         info!("Completed CREATE handshake with entry node");
 
-        let middle_key = Self::handshake_extend_to_middle(
-            circuit_id,
-            &mut entry_stream,
-            middle,
-            &mut entry_cipher,
-        )
-        .await?;
-        let mut middle_cipher = CipherPair::new(&middle_key);
-        info!("Completed EXTEND to middle node");
+        let mut session_keys: Vec<SessionKey> = vec![entry_key.clone()];
+        let mut ciphers: Vec<CipherPair> = vec![CipherPair::new(&entry_key)];
 
-        let exit_key = Self::handshake_extend_to_exit(
-            circuit_id,
-            &mut entry_stream,
-            exit,
-            &mut entry_cipher,
-            &mut middle_cipher,
-        )
-        .await?;
-        let exit_cipher = CipherPair::new(&exit_key);
-        info!("Completed EXTEND to exit node");
+        // EXTEND loop for hops 1..N-1.
+        for hop_index in 1..path.len() {
+            let node = path
+                .get(hop_index)
+                .ok_or_else(|| anyhow::anyhow!("Missing node at hop {}", hop_index))?;
+            let key =
+                Self::handshake_extend(circuit_id, &mut entry_stream, node, &mut ciphers).await?;
+            info!("Completed EXTEND to hop {} ({})", hop_index, node.address);
+            session_keys.push(key.clone());
+            ciphers.push(CipherPair::new(&key));
+        }
 
-        let onion_keys = OnionKeys::from_parts(
-            entry_key,
-            middle_key,
-            exit_key,
-            entry_cipher,
-            middle_cipher,
-            exit_cipher,
+        let onion_keys = OnionKeys::new(session_keys, ciphers);
+
+        let path_display = Some(
+            path.iter()
+                .map(|n| format!(":{}", n.address.port()))
+                .collect::<Vec<_>>()
+                .join(" \u{2192} "),
         );
-
-        let path_display = Some(format!(
-            ":{} \u{2192} :{} \u{2192} :{}",
-            entry.address.port(),
-            middle.address.port(),
-            exit.address.port()
-        ));
 
         let (read_half, write_half) = tokio::io::split(entry_stream);
 
@@ -255,46 +241,57 @@ impl CircuitBuilder {
         Ok(session_key)
     }
 
-    /// EXTEND to the middle node (ntor, encrypted with entry cipher).
-    async fn handshake_extend_to_middle(
+    /// EXTEND to the next hop (ntor). `ciphers` contains the k already-established cipher
+    /// pairs. The payload is wrapped in k layers (outermost first), and the EXTENDED response
+    /// is unwrapped in the same order before ntor verification.
+    async fn handshake_extend(
         circuit_id: CircuitId,
         stream: &mut TcpStream,
-        middle: &NodeDescriptor,
-        entry_cipher: &mut CipherPair,
+        node: &NodeDescriptor,
+        ciphers: &mut [CipherPair],
     ) -> Result<SessionKey> {
         let ephemeral = NtorEphemeralKeyPair::generate();
         let our_public = ephemeral.public.bytes;
 
-        let addr_str = middle.address.to_string();
+        let addr_str = node.address.to_string();
         let mut extend_payload = Vec::with_capacity(addr_str.len() + 1 + 32);
         extend_payload.extend_from_slice(addr_str.as_bytes());
         extend_payload.push(0);
         extend_payload.extend_from_slice(&our_public);
 
-        entry_cipher.apply_forward(&mut extend_payload);
+        // Wrap in k layers: innermost (last cipher) first, outermost (first cipher) last.
+        for cipher in ciphers.iter_mut().rev() {
+            cipher.apply_forward(&mut extend_payload);
+        }
 
         let extend_msg = Message::extend(circuit_id, extend_payload);
         extend_msg
             .write_to_stream(stream)
             .await
-            .context("Failed to send EXTEND to middle")?;
-        debug!("Sent EXTEND for middle node {}", middle.address);
+            .with_context(|| format!("Failed to send EXTEND to {}", node.address))?;
+        debug!("Sent EXTEND for node {}", node.address);
 
         let extended_msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, Message::from_stream(stream))
             .await
-            .context("Timed out waiting for EXTENDED from middle node")?
-            .context("Failed to read EXTENDED")?
-            .ok_or_else(|| anyhow::anyhow!("Connection closed during EXTEND to middle"))?;
+            .with_context(|| format!("Timed out waiting for EXTENDED from {}", node.address))?
+            .with_context(|| format!("Failed to read EXTENDED from {}", node.address))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Connection closed during EXTEND to {}", node.address)
+            })?;
 
         if extended_msg.command != MessageCommand::Extended {
             return Err(anyhow::anyhow!(
-                "Expected EXTENDED, got {}",
+                "Expected EXTENDED from {}, got {}",
+                node.address,
                 extended_msg.command
             ));
         }
 
+        // Unwrap k layers: outermost (first cipher) first, innermost (last cipher) last.
         let mut decrypted = extended_msg.data;
-        entry_cipher.apply_backward(&mut decrypted);
+        for cipher in ciphers.iter_mut() {
+            cipher.apply_backward(&mut decrypted);
+        }
 
         if decrypted.len() < 64 {
             return Err(anyhow::anyhow!(
@@ -319,90 +316,13 @@ impl CircuitBuilder {
         let session_key = ntor_client_finish_raw(
             ephemeral.secret_bytes(),
             &our_public,
-            &middle.public_key.bytes,
+            &node.public_key.bytes,
             &server_eph_pub,
             &auth,
         )
-        .map_err(|e| anyhow::anyhow!("ntor handshake failed with middle: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("ntor handshake failed with {}: {}", node.address, e))?;
 
-        debug!("ntor handshake complete with middle node");
-        Ok(session_key)
-    }
-
-    /// EXTEND to the exit node (ntor, encrypted with 2 layers).
-    async fn handshake_extend_to_exit(
-        circuit_id: CircuitId,
-        stream: &mut TcpStream,
-        exit: &NodeDescriptor,
-        entry_cipher: &mut CipherPair,
-        middle_cipher: &mut CipherPair,
-    ) -> Result<SessionKey> {
-        let ephemeral = NtorEphemeralKeyPair::generate();
-        let our_public = ephemeral.public.bytes;
-
-        let addr_str = exit.address.to_string();
-        let mut extend_payload = Vec::with_capacity(addr_str.len() + 1 + 32);
-        extend_payload.extend_from_slice(addr_str.as_bytes());
-        extend_payload.push(0);
-        extend_payload.extend_from_slice(&our_public);
-
-        middle_cipher.apply_forward(&mut extend_payload);
-        entry_cipher.apply_forward(&mut extend_payload);
-
-        let extend_msg = Message::extend(circuit_id, extend_payload);
-        extend_msg
-            .write_to_stream(stream)
-            .await
-            .context("Failed to send EXTEND to exit")?;
-        debug!("Sent EXTEND for exit node {}", exit.address);
-
-        let extended_msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, Message::from_stream(stream))
-            .await
-            .context("Timed out waiting for EXTENDED from exit node")?
-            .context("Failed to read EXTENDED")?
-            .ok_or_else(|| anyhow::anyhow!("Connection closed during EXTEND to exit"))?;
-
-        if extended_msg.command != MessageCommand::Extended {
-            return Err(anyhow::anyhow!(
-                "Expected EXTENDED, got {}",
-                extended_msg.command
-            ));
-        }
-
-        let mut decrypted = extended_msg.data;
-        entry_cipher.apply_backward(&mut decrypted);
-        middle_cipher.apply_backward(&mut decrypted);
-
-        if decrypted.len() < 64 {
-            return Err(anyhow::anyhow!(
-                "EXTENDED response too short: {} bytes (need 64)",
-                decrypted.len()
-            ));
-        }
-
-        let mut server_eph_pub = [0u8; 32];
-        server_eph_pub.copy_from_slice(
-            decrypted
-                .get(0..32)
-                .ok_or_else(|| anyhow::anyhow!("Invalid EXTENDED data"))?,
-        );
-        let mut auth = [0u8; 32];
-        auth.copy_from_slice(
-            decrypted
-                .get(32..64)
-                .ok_or_else(|| anyhow::anyhow!("Invalid EXTENDED auth"))?,
-        );
-
-        let session_key = ntor_client_finish_raw(
-            ephemeral.secret_bytes(),
-            &our_public,
-            &exit.public_key.bytes,
-            &server_eph_pub,
-            &auth,
-        )
-        .map_err(|e| anyhow::anyhow!("ntor handshake failed with exit: {}", e))?;
-
-        debug!("ntor handshake complete with exit node");
+        debug!("ntor handshake complete with {}", node.address);
         Ok(session_key)
     }
 }
@@ -413,17 +333,32 @@ pub struct CircuitPool {
     next_circuit_id: CircuitId,
     directory_client: DirectoryClient,
     pool_size: usize,
+    hop_count: usize,
     metrics: Option<Arc<ClientMetrics>>,
+    max_rebuild_attempts: usize,
+    /// Consecutive rebuild failure count per circuit slot.
+    rebuild_failure_counts: HashMap<CircuitId, usize>,
+    /// Slots that exhausted their retries and should no longer be rebuilt.
+    abandoned_slots: HashSet<CircuitId>,
 }
 
 impl CircuitPool {
-    pub fn new(directory_client: DirectoryClient, pool_size: usize) -> Self {
+    pub fn new(
+        directory_client: DirectoryClient,
+        pool_size: usize,
+        hop_count: usize,
+        max_rebuild_attempts: usize,
+    ) -> Self {
         Self {
             circuits: HashMap::new(),
             next_circuit_id: 1,
             directory_client,
             pool_size,
+            hop_count,
             metrics: None,
+            max_rebuild_attempts,
+            rebuild_failure_counts: HashMap::new(),
+            abandoned_slots: HashSet::new(),
         }
     }
 
@@ -510,6 +445,11 @@ impl CircuitPool {
         Ok((Arc::clone(circuit), Some(read_half)))
     }
 
+    /// Returns true if this circuit slot has exceeded its rebuild attempt budget.
+    pub fn is_abandoned(&self, circuit_id: CircuitId) -> bool {
+        self.abandoned_slots.contains(&circuit_id)
+    }
+
     /// Replace a failed circuit and replenish the pool.
     pub async fn replace_circuit(
         &mut self,
@@ -517,7 +457,40 @@ impl CircuitPool {
     ) -> Result<(Arc<Mutex<Circuit>>, ReadHalf<TcpStream>)> {
         info!("Replacing failed circuit {}", failed_id);
         self.circuits.remove(&failed_id);
-        let (circuit_id, read_half) = self.build_circuit().await?;
+        let build_result = self.build_circuit().await;
+
+        let (circuit_id, read_half) = match build_result {
+            Ok(pair) => {
+                // Success — clear any previous failure streak for this slot.
+                self.rebuild_failure_counts.remove(&failed_id);
+                pair
+            }
+            Err(e) => {
+                let count = self.rebuild_failure_counts.entry(failed_id).or_insert(0);
+                *count += 1;
+                if *count >= self.max_rebuild_attempts {
+                    self.abandoned_slots.insert(failed_id);
+                    error!(
+                        "Circuit slot {} permanently failed after {} rebuild attempt(s) \
+                         with --hops {}. Not enough relay nodes registered or nodes are \
+                         unreachable. This slot will no longer be retried. \
+                         Hint: register more relay nodes or reduce --hops.",
+                        failed_id, self.max_rebuild_attempts, self.hop_count,
+                    );
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.push_event(EventKind::Error {
+                            message: format!(
+                                "Circuit slot {failed_id} abandoned after \
+                                 {} rebuild attempt(s)",
+                                self.max_rebuild_attempts
+                            ),
+                        });
+                    }
+                }
+                return Err(e);
+            }
+        };
+
         let circuit = self
             .circuits
             .get(&circuit_id)
@@ -540,9 +513,16 @@ impl CircuitPool {
         let circuit_id = self.allocate_circuit_id();
         let path = self
             .directory_client
-            .get_random_path()
+            .get_random_path(self.hop_count)
             .await
-            .context("Failed to get path from directory")?;
+            .with_context(|| {
+                format!(
+                    "Failed to get a {}-hop path from the directory service \
+                 (requires: 1 entry + {} middle + 1 exit relay node(s) registered)",
+                    self.hop_count,
+                    self.hop_count.saturating_sub(2),
+                )
+            })?;
 
         let built = CircuitBuilder::build(circuit_id, &path).await?;
 
@@ -713,6 +693,30 @@ pub fn spawn_circuit_monitor(
             };
 
             for failed_id in failed_ids {
+                // Skip slots that already exhausted their rebuild budget.
+                {
+                    let g = pool.lock().await;
+                    if g.is_abandoned(failed_id) {
+                        continue;
+                    }
+                }
+
+                // Exponential backoff: base 5s * 2^failures, capped at 60s.
+                // We already slept `check_interval`; only add the difference.
+                let backoff = {
+                    let g = pool.lock().await;
+                    let failures = g
+                        .rebuild_failure_counts
+                        .get(&failed_id)
+                        .copied()
+                        .unwrap_or(0);
+                    let secs = (5u64 * (1u64 << failures)).min(60);
+                    Duration::from_secs(secs)
+                };
+                if backoff > check_interval {
+                    tokio::time::sleep(backoff - check_interval).await;
+                }
+
                 info!("Circuit monitor: replacing closed circuit {}", failed_id);
                 let mut g = pool.lock().await;
                 match g.replace_circuit(failed_id).await {
@@ -723,11 +727,11 @@ pub fn spawn_circuit_monitor(
                     }
                     Err(e) => {
                         error!(
-                            "Circuit monitor: failed to replace circuit {}: {}",
+                            "Circuit monitor: failed to replace circuit {}: {:#}",
                             failed_id, e
                         );
                         metrics.push_event(EventKind::Error {
-                            message: format!("Monitor replace failed: {e}"),
+                            message: format!("Monitor replace failed: {e:#}"),
                         });
                     }
                 }
@@ -758,10 +762,7 @@ pub fn spawn_circuit_keepalive(
                     let msg = Message::padding(c.circuit_id);
                     let mut w = c.entry_writer.lock().await;
                     if let Err(e) = msg.write_to_stream(&mut *w).await {
-                        debug!(
-                            "Keepalive write failed for circuit {}: {}",
-                            c.circuit_id, e
-                        );
+                        debug!("Keepalive write failed for circuit {}: {}", c.circuit_id, e);
                         // circuit_monitor will detect the Closed state and rebuild
                     }
                 }
@@ -778,7 +779,7 @@ mod tests {
     #[test]
     fn test_circuit_id_allocation_monotonic() {
         let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
-        let mut pool = CircuitPool::new(directory_client, 3);
+        let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
 
         let id1 = pool.allocate_circuit_id();
         let id2 = pool.allocate_circuit_id();
@@ -799,7 +800,7 @@ mod tests {
     #[test]
     fn test_pool_size_configuration() {
         let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
-        let pool = CircuitPool::new(directory_client, 5);
+        let pool = CircuitPool::new(directory_client, 5, 3, 3);
         assert_eq!(pool.pool_size, 5);
         assert_eq!(pool.circuit_count(), 0);
     }
@@ -825,5 +826,75 @@ mod tests {
             wrap_id = 1;
         }
         assert_eq!(wrap_id, 1);
+    }
+
+    #[test]
+    fn test_rebuild_failure_increments_counter() {
+        let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
+        let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
+
+        // Simulate a failure by manually incrementing the counter (no real TCP).
+        let failed_id: CircuitId = 42;
+        let count = pool.rebuild_failure_counts.entry(failed_id).or_insert(0);
+        *count += 1;
+
+        assert_eq!(
+            pool.rebuild_failure_counts
+                .get(&failed_id)
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+        assert!(!pool.is_abandoned(failed_id));
+    }
+
+    #[test]
+    fn test_rebuild_failure_abandoned_after_max() {
+        let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
+        let mut pool = CircuitPool::new(directory_client, 3, 3, 2);
+
+        let failed_id: CircuitId = 7;
+
+        // Simulate max_rebuild_attempts (2) consecutive failures.
+        for _ in 0..2 {
+            let count = pool.rebuild_failure_counts.entry(failed_id).or_insert(0);
+            *count += 1;
+            if *count >= pool.max_rebuild_attempts {
+                pool.abandoned_slots.insert(failed_id);
+            }
+        }
+
+        assert!(pool.is_abandoned(failed_id));
+    }
+
+    #[test]
+    fn test_rebuild_success_resets_counter() {
+        let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
+        let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
+
+        let failed_id: CircuitId = 5;
+
+        // One failure.
+        let count = pool.rebuild_failure_counts.entry(failed_id).or_insert(0);
+        *count += 1;
+        assert_eq!(
+            pool.rebuild_failure_counts
+                .get(&failed_id)
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+
+        // Simulate success: clear the counter.
+        pool.rebuild_failure_counts.remove(&failed_id);
+
+        assert_eq!(
+            pool.rebuild_failure_counts
+                .get(&failed_id)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert!(!pool.is_abandoned(failed_id));
     }
 }

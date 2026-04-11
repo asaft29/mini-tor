@@ -1,11 +1,11 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
 use common::NodeDescriptor;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use utoipa::ToSchema;
 
@@ -83,19 +83,38 @@ pub async fn get_all_nodes(State(state): State<AppState>) -> Result<Json<NodesRe
     Ok(Json(NodesResponse { nodes, count }))
 }
 
-/// Get random path for circuit (always returns 3 nodes: entry, middle, exit).
+/// Query parameters for the random path endpoint.
+#[derive(Deserialize)]
+pub struct RandomPathQuery {
+    #[serde(default = "default_hop_count")]
+    pub count: usize,
+}
+
+fn default_hop_count() -> usize {
+    3
+}
+
+/// Get random path for circuit. Returns `count` nodes: 1 entry + (count-2) middles + 1 exit.
+/// `count` defaults to 3 and is clamped to a minimum of 3.
 #[utoipa::path(
     get,
     path = "/api/nodes/random",
+    params(
+        ("count" = Option<usize>, Query, description = "Number of hops (default 3, minimum 3)")
+    ),
     responses(
-        (status = 200, description = "Random path with 3 nodes (entry, middle, exit)", body = Vec<NodeDescriptor>),
+        (status = 200, description = "Random path with N nodes (entry, middles, exit)", body = Vec<NodeDescriptor>),
         (status = 503, description = "Insufficient nodes available")
     ),
     tag = "nodes"
 )]
-pub async fn get_random_path(State(state): State<AppState>) -> Result<Json<Vec<NodeDescriptor>>> {
+pub async fn get_random_path(
+    State(state): State<AppState>,
+    Query(params): Query<RandomPathQuery>,
+) -> Result<Json<Vec<NodeDescriptor>>> {
+    let count = params.count.max(3);
     let registry = state.registry.read().await;
-    let path = registry.get_random_path()?;
+    let path = registry.get_random_path(count)?;
 
     if let Some(m) = &state.metrics {
         m.path_requests.fetch_add(1, Ordering::Relaxed);

@@ -40,7 +40,7 @@ async fn test_get_random_path_success() {
         .await;
 
     let client = DirectoryClient::new(mock_server.uri());
-    let result = client.get_random_path().await.unwrap();
+    let result = client.get_random_path(3).await.unwrap();
 
     assert_eq!(result.len(), 3);
     assert_eq!(result[0].node_id, "entry-1");
@@ -63,7 +63,7 @@ async fn test_get_random_path_server_error_503() {
         .await;
 
     let client = DirectoryClient::new(mock_server.uri());
-    let result = client.get_random_path().await;
+    let result = client.get_random_path(3).await;
 
     assert!(result.is_err());
     let err_msg = format!("{:#}", result.unwrap_err());
@@ -92,7 +92,7 @@ async fn test_get_random_path_wrong_count() {
         .await;
 
     let client = DirectoryClient::new(mock_server.uri());
-    let result = client.get_random_path().await;
+    let result = client.get_random_path(3).await;
 
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());

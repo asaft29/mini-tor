@@ -27,10 +27,13 @@ impl DirectoryClient {
         }
     }
 
-    /// Fetch a random 3-node path (entry, middle, exit) from the directory.
-    pub async fn get_random_path(&self) -> Result<Vec<NodeDescriptor>> {
-        let url = format!("{}/api/nodes/random", self.directory_url);
-        debug!("Fetching random path from {}", url);
+    /// Fetch a random N-hop path from the directory (1 entry + (hop_count-2) middles + 1 exit).
+    pub async fn get_random_path(&self, hop_count: usize) -> Result<Vec<NodeDescriptor>> {
+        let url = format!(
+            "{}/api/nodes/random?count={}",
+            self.directory_url, hop_count
+        );
+        debug!("Fetching {}-hop random path from {}", hop_count, url);
 
         let nodes = self
             .http_client
@@ -44,27 +47,22 @@ impl DirectoryClient {
             .await
             .context("Failed to parse node descriptors")?;
 
-        if nodes.len() != 3 {
+        if nodes.len() != hop_count {
             return Err(anyhow::anyhow!(
-                "Expected 3 nodes from directory, got {}",
+                "Expected {} nodes from directory, got {}",
+                hop_count,
                 nodes.len()
             ));
         }
 
         info!(
-            "Got random path: {} -> {} -> {}",
+            "Got {}-hop random path: {}",
+            nodes.len(),
             nodes
-                .first()
+                .iter()
                 .map(|n| n.address.to_string())
-                .unwrap_or_default(),
-            nodes
-                .get(1)
-                .map(|n| n.address.to_string())
-                .unwrap_or_default(),
-            nodes
-                .get(2)
-                .map(|n| n.address.to_string())
-                .unwrap_or_default(),
+                .collect::<Vec<_>>()
+                .join(" -> ")
         );
 
         Ok(nodes)

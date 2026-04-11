@@ -360,7 +360,9 @@ impl MiddleCircuitHandler {
             // Downstream (exit) closed — send DESTROY upstream toward entry then shut down.
             {
                 let mut writer = prev_hop_write.lock().await;
-                let _ = Message::destroy(circuit_id).write_to_stream(&mut *writer).await;
+                let _ = Message::destroy(circuit_id)
+                    .write_to_stream(&mut *writer)
+                    .await;
                 let _ = writer.shutdown().await;
             }
             info!(

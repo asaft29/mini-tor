@@ -164,8 +164,15 @@ impl NodeRegistry {
             .collect()
     }
 
-    /// Get random 3-hop path (entry, middle, exit).
-    pub fn get_random_path(&self) -> Result<Vec<NodeDescriptor>, RegistryError> {
+    /// Get a random N-hop path: 1 entry + (count-2) middles + 1 exit.
+    /// `count` must be >= 3.
+    pub fn get_random_path(&self, count: usize) -> Result<Vec<NodeDescriptor>, RegistryError> {
+        if count < 3 {
+            return Err(RegistryError::InsufficientNodes(format!(
+                "hop count must be >= 3, got {count}"
+            )));
+        }
+
         let entry_nodes = self.get_nodes_by_type(NodeType::Entry);
         let middle_nodes = self.get_nodes_by_type(NodeType::Middle);
         let exit_nodes = self.get_nodes_by_type(NodeType::Exit);
@@ -187,11 +194,18 @@ impl NodeRegistry {
         }
 
         let mut rng = rand::rng();
-        let entry = Self::select_weighted_node(&entry_nodes, &mut rng)?;
-        let middle = Self::select_weighted_node(&middle_nodes, &mut rng)?;
-        let exit = Self::select_weighted_node(&exit_nodes, &mut rng)?;
+        let middle_count = count - 2;
 
-        Ok(vec![entry, middle, exit])
+        let mut path = Vec::with_capacity(count);
+        path.push(Self::select_weighted_node(&entry_nodes, &mut rng)?);
+        for _ in 0..middle_count {
+            // With-replacement: if only 1 middle exists it is selected multiple times.
+            // Each hop still gets a distinct session key and cipher pair.
+            path.push(Self::select_weighted_node(&middle_nodes, &mut rng)?);
+        }
+        path.push(Self::select_weighted_node(&exit_nodes, &mut rng)?);
+
+        Ok(path)
     }
 
     fn select_weighted_node<R: Rng>(
@@ -394,7 +408,7 @@ mod tests {
         reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
         reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
 
-        let path = reg.get_random_path().unwrap();
+        let path = reg.get_random_path(3).unwrap();
         assert_eq!(path.len(), 3);
         assert_eq!(path[0].node_type, NodeType::Entry);
         assert_eq!(path[1].node_type, NodeType::Middle);
@@ -407,7 +421,7 @@ mod tests {
         reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
         reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
 
-        let err = reg.get_random_path().unwrap_err();
+        let err = reg.get_random_path(3).unwrap_err();
         assert!(matches!(err, RegistryError::InsufficientNodes(_)));
     }
 
@@ -417,7 +431,7 @@ mod tests {
         reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
         reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
 
-        let err = reg.get_random_path().unwrap_err();
+        let err = reg.get_random_path(3).unwrap_err();
         assert!(matches!(err, RegistryError::InsufficientNodes(_)));
     }
 
@@ -427,7 +441,7 @@ mod tests {
         reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
         reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
 
-        let err = reg.get_random_path().unwrap_err();
+        let err = reg.get_random_path(3).unwrap_err();
         assert!(matches!(err, RegistryError::InsufficientNodes(_)));
     }
 
@@ -435,7 +449,7 @@ mod tests {
     fn test_get_random_path_empty() {
         let reg = make_registry();
 
-        let err = reg.get_random_path().unwrap_err();
+        let err = reg.get_random_path(3).unwrap_err();
         assert!(matches!(err, RegistryError::InsufficientNodes(_)));
     }
 
@@ -528,5 +542,76 @@ mod tests {
         assert_eq!(stats.exit_count, 0);
         assert!(stats.oldest_node_age_secs.is_none());
         assert!(stats.newest_node_age_secs.is_none());
+    }
+
+    #[test]
+    fn test_get_random_path_4_hops() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("middle-2", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let path = reg.get_random_path(4).unwrap();
+        assert_eq!(path.len(), 4);
+        assert_eq!(path[0].node_type, NodeType::Entry);
+        assert_eq!(path[1].node_type, NodeType::Middle);
+        assert_eq!(path[2].node_type, NodeType::Middle);
+        assert_eq!(path[3].node_type, NodeType::Exit);
+    }
+
+    #[test]
+    fn test_get_random_path_5_hops() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("middle-2", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("middle-3", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let path = reg.get_random_path(5).unwrap();
+        assert_eq!(path.len(), 5);
+        assert_eq!(path[0].node_type, NodeType::Entry);
+        assert_eq!(path[1].node_type, NodeType::Middle);
+        assert_eq!(path[2].node_type, NodeType::Middle);
+        assert_eq!(path[3].node_type, NodeType::Middle);
+        assert_eq!(path[4].node_type, NodeType::Exit);
+    }
+
+    #[test]
+    fn test_get_random_path_with_replacement() {
+        // Only 1 middle node available — 5-hop path should still succeed via with-replacement.
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let path = reg.get_random_path(5).unwrap();
+        assert_eq!(path.len(), 5);
+        assert_eq!(path[0].node_type, NodeType::Entry);
+        assert!(path[1..=3].iter().all(|n| n.node_type == NodeType::Middle));
+        assert_eq!(path[4].node_type, NodeType::Exit);
+    }
+
+    #[test]
+    fn test_get_random_path_count_below_minimum() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let err = reg.get_random_path(2).unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_get_random_path_count_1_rejected() {
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let err = reg.get_random_path(1).unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
     }
 }

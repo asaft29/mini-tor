@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use dialoguer::{Confirm, theme::ColorfulTheme};
 use simple_socks5::conn::reply::Rep;
 use simple_socks5::conn::request::CMD;
 use simple_socks5::parse::AddrPort;
@@ -8,10 +9,9 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tor_client::circuit::{
-    CircuitPool, CircuitState, spawn_circuit_keepalive, spawn_circuit_monitor,
-    spawn_circuit_reader,
+    CircuitPool, CircuitState, spawn_circuit_keepalive, spawn_circuit_monitor, spawn_circuit_reader,
 };
-use tor_client::config::TorClientConfig;
+use tor_client::config::{MAX_HOPS, TorClientConfig};
 use tor_client::directory_client::DirectoryClient;
 use tor_client::metrics::{ClientMetrics, EventKind};
 use tor_client::stream::handle_stream;
@@ -21,6 +21,27 @@ use tracing::{error, info, warn};
 async fn main() -> Result<()> {
     let config = TorClientConfig::parse();
 
+    // Prompt for explicit confirmation before building a maximum-size circuit.
+    // Do this before initializing logging so the prompt is always visible.
+    if config.hops == MAX_HOPS {
+        let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "You requested a {MAX_HOPS}-hop circuit (the maximum).\n  \
+                 This requires {MAX_HOPS} relay nodes and adds significant latency.\n  \
+                 A {MAX_HOPS}-node circuit will be built: 1 entry + {} middles + 1 exit.\n  \
+                 Do you understand and want to proceed?",
+                MAX_HOPS - 2
+            ))
+            .default(false)
+            .interact()
+            .context("Failed to read confirmation")?;
+
+        if !confirmed {
+            eprintln!("Aborted. Use --hops <3-9> for a smaller circuit.");
+            std::process::exit(0);
+        }
+    }
+
     if config.tui {
         tracing_subscriber::fmt().with_writer(std::io::sink).init();
     } else {
@@ -28,20 +49,36 @@ async fn main() -> Result<()> {
     }
 
     info!(
-        "Starting Tor client: socks_addr={}, directory_url={}, pool_size={}",
-        config.socks_addr, config.directory_url, config.pool_size
+        "Starting Tor client: socks_addr={}, directory_url={}, pool_size={}, hops={}",
+        config.socks_addr, config.directory_url, config.pool_size, config.hops
     );
 
     let metrics = ClientMetrics::new();
 
     let directory_client = DirectoryClient::new(config.directory_url.clone());
-    let mut pool = CircuitPool::new(directory_client, config.pool_size);
+    let mut pool = CircuitPool::new(
+        directory_client,
+        config.pool_size,
+        config.hops,
+        config.max_rebuild_attempts,
+    );
     pool.set_metrics(Arc::clone(&metrics));
 
-    let built_circuits = pool
-        .initialize()
-        .await
-        .context("Failed to initialize circuit pool")?;
+    let built_circuits = match pool.initialize().await {
+        Ok(circuits) => circuits,
+        Err(e) => {
+            error!(
+                "Circuit pool initialization failed with --hops {}: {:#}\n\
+                 Hint: ensure at least 1 entry, {} middle, and 1 exit relay are \
+                 registered with the discovery service at {}",
+                config.hops,
+                e,
+                config.hops.saturating_sub(2),
+                config.directory_url,
+            );
+            return Err(e);
+        }
+    };
 
     for (circuit, read_half) in built_circuits {
         spawn_circuit_reader(circuit, read_half, Arc::clone(&metrics));
@@ -49,7 +86,11 @@ async fn main() -> Result<()> {
 
     let pool = Arc::new(Mutex::new(pool));
 
-    spawn_circuit_monitor(Arc::clone(&pool), Arc::clone(&metrics), std::time::Duration::from_secs(5));
+    spawn_circuit_monitor(
+        Arc::clone(&pool),
+        Arc::clone(&metrics),
+        std::time::Duration::from_secs(5),
+    );
     spawn_circuit_keepalive(Arc::clone(&pool), std::time::Duration::from_secs(5));
 
     let mut server = Socks5::bind(&config.socks_addr)

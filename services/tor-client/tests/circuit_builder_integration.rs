@@ -286,10 +286,11 @@ async fn test_full_telescopic_handshake() {
         tor_client::circuit::CircuitState::Ready
     );
 
-    // Onion keys should be populated (non-zero)
-    assert_ne!(built.circuit.onion_keys.entry.forward, [0u8; 16]);
-    assert_ne!(built.circuit.onion_keys.middle.forward, [0u8; 16]);
-    assert_ne!(built.circuit.onion_keys.exit.forward, [0u8; 16]);
+    // Onion keys should be populated — 3 hops with non-zero session keys
+    assert_eq!(built.circuit.onion_keys.session_keys.len(), 3);
+    assert_ne!(built.circuit.onion_keys.session_keys[0].forward, [0u8; 16]);
+    assert_ne!(built.circuit.onion_keys.session_keys[1].forward, [0u8; 16]);
+    assert_ne!(built.circuit.onion_keys.session_keys[2].forward, [0u8; 16]);
 }
 
 /// Path with wrong number of nodes should fail
@@ -307,7 +308,7 @@ async fn test_build_rejects_wrong_path_length() {
         Err(e) => {
             let err = format!("{e}");
             assert!(
-                err.contains("exactly 3 nodes"),
+                err.contains("at least 3 nodes"),
                 "Expected path length error, got: {err}",
             );
         }

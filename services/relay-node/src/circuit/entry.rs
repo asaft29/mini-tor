@@ -287,7 +287,9 @@ impl EntryCircuitHandler {
                         // DESTROY from middle — propagate upstream to client and shut down.
                         if msg.command == MessageCommand::Destroy {
                             let mut writer = client_write.lock().await;
-                            let _ = Message::destroy(circuit_id).write_to_stream(&mut *writer).await;
+                            let _ = Message::destroy(circuit_id)
+                                .write_to_stream(&mut *writer)
+                                .await;
                             let _ = writer.shutdown().await;
                             destroy_sent = true;
                             break;
@@ -340,7 +342,9 @@ impl EntryCircuitHandler {
             // Downstream (middle) closed without DESTROY — notify client and shut down.
             if !destroy_sent {
                 let mut writer = client_write.lock().await;
-                let _ = Message::destroy(circuit_id).write_to_stream(&mut *writer).await;
+                let _ = Message::destroy(circuit_id)
+                    .write_to_stream(&mut *writer)
+                    .await;
                 let _ = writer.shutdown().await;
             }
             info!(
