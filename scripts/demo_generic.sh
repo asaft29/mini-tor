@@ -49,23 +49,26 @@ NUM_HOPS=""
 SKIP_BUILD=false
 NO_TUI=false
 AUTO_YES=false
+KILL_STALE=false
 
 for arg in "$@"; do
     case "$arg" in
-        --skip-build) SKIP_BUILD=true ;;
-        --no-tui)     NO_TUI=true ;;
-        --yes|-y)     AUTO_YES=true ;;
+        --skip-build)       SKIP_BUILD=true ;;
+        --no-tui)           NO_TUI=true ;;
+        --yes|-y)           AUTO_YES=true ;;
+        --kill-stale|-k)    KILL_STALE=true ;;
         --help|-h)
-            echo "Usage: $0 <num_hops> [--skip-build] [--no-tui] [--yes]"
+            echo "Usage: $0 <num_hops> [--skip-build] [--no-tui] [--yes] [-k]"
             echo ""
             echo "Launch a demo with <num_hops> relay nodes on localhost."
             echo "  <num_hops>  Circuit size: 3–10 hops"
             echo "              Layout: 1 entry + (N-2) middles + 1 exit"
             echo ""
             echo "Options:"
-            echo "  --skip-build   Use existing release binaries (skip cargo build)"
-            echo "  --no-tui       Run tor-client in background with log output"
-            echo "  --yes, -y      Skip the 10-hop confirmation prompt"
+            echo "  --skip-build       Use existing release binaries (skip cargo build)"
+            echo "  --no-tui           Run tor-client in background with log output"
+            echo "  --yes, -y          Skip the 10-hop confirmation prompt"
+            echo "  --kill-stale, -k   Kill any existing relay-node processes before starting"
             echo ""
             echo "Environment variables:"
             echo "  DISCOVERY_PORT  Discovery service port (default: 8080)"
@@ -255,6 +258,21 @@ check_port() {
 }
 
 # ---- Pre-flight checks ----
+
+# Stale relay-node processes register with the fresh discovery service via heartbeat,
+# corrupting the node pool with nodes from previous sessions.
+if pgrep -f "relay-node" >/dev/null 2>&1; then
+    if [ "$KILL_STALE" = true ]; then
+        warn "Killing existing relay-node processes before starting..."
+        pkill -f relay-node 2>/dev/null || true
+        sleep 0.5
+    else
+        die "existing relay-node processes are running — they will register with the new\
+ discovery service and cause circuit build failures.\
+\n  Kill them first:  pkill -f relay-node\
+\n  Or re-run with:   $0 $* -k"
+    fi
+fi
 
 check_port "$DISCOVERY_PORT" "discovery"
 check_port "$SOCKS_PORT" "SOCKS5 proxy"

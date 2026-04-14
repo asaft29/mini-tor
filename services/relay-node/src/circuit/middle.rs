@@ -6,10 +6,16 @@ use common::{
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
+
+/// How long a relay waits for CREATED from the next hop before giving up.
+/// Must be less than the client's HANDSHAKE_TIMEOUT (30s) so the relay can
+/// return a clean error rather than the client timing out with a confusing message.
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Middle node circuit handler — second hop, knows neither client nor destination.
 pub struct MiddleCircuitHandler {
@@ -111,9 +117,14 @@ impl MiddleCircuitHandler {
         create_msg.write_to_stream(&mut stream).await?;
         debug!("Middle: Sent CREATE to next hop");
 
-        let created_msg = Message::from_stream(&mut stream)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection closed waiting for CREATED"))?;
+        let created_msg =
+            tokio::time::timeout(RELAY_HANDSHAKE_TIMEOUT, Message::from_stream(&mut stream))
+                .await
+                .map_err(|_| anyhow::anyhow!("Timed out waiting for CREATED from {}", addr))?
+                .map_err(|e| anyhow::anyhow!("Error reading CREATED from {}: {}", addr, e))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Connection closed waiting for CREATED from {}", addr)
+                })?;
 
         if created_msg.command != MessageCommand::Created {
             return Err(anyhow::anyhow!(
@@ -244,7 +255,17 @@ impl MiddleCircuitHandler {
     pub async fn handle_message(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         match msg.command {
             MessageCommand::Create => self.handle_create(msg).await,
-            MessageCommand::Extend => self.handle_extend(msg).await,
+            MessageCommand::Extend => {
+                if self.next_hop.is_some() {
+                    debug!(
+                        "Middle: Relaying EXTEND to next hop for circuit {}",
+                        self.context.circuit_id
+                    );
+                    self.handle_relay(msg).await
+                } else {
+                    self.handle_extend(msg).await
+                }
+            }
             MessageCommand::Extended => self.handle_extended(msg).await,
             MessageCommand::Data
             | MessageCommand::Begin

@@ -6,10 +6,14 @@ use common::{
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
+
+/// How long a relay waits for CREATED from the next hop before giving up.
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Entry node circuit handler — first hop, knows the client but NOT the destination.
 pub struct EntryCircuitHandler {
@@ -114,9 +118,19 @@ impl EntryCircuitHandler {
         create_msg.write_to_stream(&mut next_hop_stream).await?;
         debug!("Entry: Sent CREATE to next hop");
 
-        let created_msg = Message::from_stream(&mut next_hop_stream)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Next hop closed connection waiting for CREATED"))?;
+        let created_msg = tokio::time::timeout(
+            RELAY_HANDSHAKE_TIMEOUT,
+            Message::from_stream(&mut next_hop_stream),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out waiting for CREATED from {}", addr_str))?
+        .map_err(|e| anyhow::anyhow!("Error reading CREATED from {}: {}", addr_str, e))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Next hop closed connection waiting for CREATED from {}",
+                addr_str
+            )
+        })?;
 
         if created_msg.command != MessageCommand::Created {
             return Err(anyhow::anyhow!(

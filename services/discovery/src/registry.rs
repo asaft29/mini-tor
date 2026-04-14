@@ -182,10 +182,19 @@ impl NodeRegistry {
                 "No entry nodes available".to_string(),
             ));
         }
+        let middle_count = count - 2;
+
         if middle_nodes.is_empty() {
             return Err(RegistryError::InsufficientNodes(
                 "No middle nodes available".to_string(),
             ));
+        }
+        if middle_nodes.len() < middle_count {
+            return Err(RegistryError::InsufficientNodes(format!(
+                "Need {middle_count} unique middle nodes for a {count}-hop circuit, \
+                 only {} registered",
+                middle_nodes.len()
+            )));
         }
         if exit_nodes.is_empty() {
             return Err(RegistryError::InsufficientNodes(
@@ -194,14 +203,16 @@ impl NodeRegistry {
         }
 
         let mut rng = rand::rng();
-        let middle_count = count - 2;
 
+        // Select middle nodes WITHOUT replacement so the same relay cannot appear
+        // twice in the same circuit (duplicate hops corrupt per-hop cipher state).
+        let mut available_middles = middle_nodes;
         let mut path = Vec::with_capacity(count);
         path.push(Self::select_weighted_node(&entry_nodes, &mut rng)?);
         for _ in 0..middle_count {
-            // With-replacement: if only 1 middle exists it is selected multiple times.
-            // Each hop still gets a distinct session key and cipher pair.
-            path.push(Self::select_weighted_node(&middle_nodes, &mut rng)?);
+            let idx = Self::select_weighted_index(&available_middles, &mut rng)?;
+            let node = available_middles.remove(idx);
+            path.push(node);
         }
         path.push(Self::select_weighted_node(&exit_nodes, &mut rng)?);
 
@@ -212,34 +223,38 @@ impl NodeRegistry {
         nodes: &[NodeDescriptor],
         rng: &mut R,
     ) -> Result<NodeDescriptor, RegistryError> {
-        let first_node = nodes
-            .first()
-            .ok_or_else(|| RegistryError::InsufficientNodes("Empty node list".to_string()))?;
+        let idx = Self::select_weighted_index(nodes, rng)?;
+        nodes
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| RegistryError::InsufficientNodes("Empty node list".to_string()))
+    }
+
+    /// Return the index of a bandwidth-weighted random node from `nodes`.
+    fn select_weighted_index<R: Rng>(
+        nodes: &[NodeDescriptor],
+        rng: &mut R,
+    ) -> Result<usize, RegistryError> {
+        if nodes.is_empty() {
+            return Err(RegistryError::InsufficientNodes("Empty node list".to_string()));
+        }
 
         let total_bandwidth: u64 = nodes.iter().map(|n| n.bandwidth).sum();
 
         if total_bandwidth == 0 {
-            let idx = rng.random_range(0..nodes.len());
-            if let Some(node) = nodes.get(idx) {
-                return Ok(node.clone());
-            }
-            return Ok(first_node.clone());
+            return Ok(rng.random_range(0..nodes.len()));
         }
 
         let mut random_weight = rng.random_range(0..total_bandwidth);
 
-        for node in nodes {
+        for (i, node) in nodes.iter().enumerate() {
             if random_weight < node.bandwidth {
-                return Ok(node.clone());
+                return Ok(i);
             }
             random_weight -= node.bandwidth;
         }
 
-        if let Some(last) = nodes.last() {
-            return Ok(last.clone());
-        }
-
-        Ok(first_node.clone())
+        Ok(nodes.len() - 1)
     }
 
     pub fn update_heartbeat(&mut self, node_id: &str) -> Result<(), RegistryError> {
@@ -579,18 +594,30 @@ mod tests {
     }
 
     #[test]
-    fn test_get_random_path_with_replacement() {
-        // Only 1 middle node available — 5-hop path should still succeed via with-replacement.
+    fn test_get_random_path_insufficient_middles() {
+        // Only 1 middle node available — 5-hop path needs 3 unique middles, must fail.
         let mut reg = make_registry();
         reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
         reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
         reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
 
-        let path = reg.get_random_path(5).unwrap();
-        assert_eq!(path.len(), 5);
-        assert_eq!(path[0].node_type, NodeType::Entry);
-        assert!(path[1..=3].iter().all(|n| n.node_type == NodeType::Middle));
-        assert_eq!(path[4].node_type, NodeType::Exit);
+        let err = reg.get_random_path(5).unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_get_random_path_middles_unique() {
+        // 2 middles, 4-hop path needs 2 unique middles — should succeed with distinct nodes.
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("middle-2", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let path = reg.get_random_path(4).unwrap();
+        assert_eq!(path.len(), 4);
+        // The two middle hops must be different nodes.
+        assert_ne!(path[1].node_id, path[2].node_id);
     }
 
     #[test]
