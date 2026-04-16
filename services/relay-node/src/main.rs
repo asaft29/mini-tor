@@ -71,6 +71,7 @@ async fn main() -> Result<()> {
         public_key: keypair.public_key().clone(),
         bandwidth: config.bandwidth,
         exit_policy: config.exit_policy(),
+        operator_id: config.operator_id.clone(),
     };
 
     let http_client = Client::new();

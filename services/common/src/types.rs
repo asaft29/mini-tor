@@ -147,6 +147,12 @@ pub struct NodeDescriptor {
 
     pub bandwidth: u64,
     pub exit_policy: Option<ExitPolicy>,
+
+    /// Optional operator family tag. When set, path selection refuses to place
+    /// two nodes with the same `operator_id` in the same circuit, even if they
+    /// are on different IP addresses. Purely opt-in — `None` means no grouping.
+    #[serde(default)]
+    pub operator_id: Option<String>,
 }
 
 impl NodeDescriptor {
@@ -165,6 +171,7 @@ impl NodeDescriptor {
             public_key,
             bandwidth,
             exit_policy,
+            operator_id: None,
         }
     }
 

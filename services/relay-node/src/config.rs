@@ -30,6 +30,11 @@ pub struct RelayConfig {
 
     #[arg(long, default_value = "false")]
     pub tui: bool,
+
+    /// Optional operator family tag. Nodes sharing the same operator_id are
+    /// never placed in the same circuit by the discovery service.
+    #[arg(long)]
+    pub operator_id: Option<String>,
 }
 
 impl RelayConfig {
@@ -102,6 +107,7 @@ mod tests {
             heartbeat_interval: 60,
             exit_allow_all: false,
             tui: false,
+            operator_id: None,
         };
 
         let addr = config.bind_addr().ok();
@@ -125,6 +131,7 @@ mod tests {
             heartbeat_interval: 60,
             exit_allow_all: false,
             tui: false,
+            operator_id: None,
         };
 
         let policy = config.exit_policy();
@@ -144,6 +151,7 @@ mod tests {
             heartbeat_interval: 60,
             exit_allow_all: false,
             tui: false,
+            operator_id: None,
         };
 
         assert!(config.exit_policy().is_none());

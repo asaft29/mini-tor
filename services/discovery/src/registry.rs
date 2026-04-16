@@ -160,17 +160,21 @@ impl NodeRegistry {
 
         let mut rng = rand::rng();
 
-        // Running set of IPs already committed to the circuit.
-        // Loopback addresses (127.x.x.x) are exempt so localhost demos still work.
+        // Running exclusion sets for IPs and operator families already committed
+        // to the circuit. Loopback IPs are exempt so localhost demos still work.
         let mut excluded_ips = std::collections::HashSet::<std::net::IpAddr>::new();
+        let mut excluded_ops = std::collections::HashSet::<String>::new();
 
         // Pick exit first — it has the most constraints (exit policy).
         let exit_node = Self::select_weighted_node(&exit_nodes, &mut rng)?;
         if !exit_node.address.ip().is_loopback() {
             excluded_ips.insert(exit_node.address.ip());
         }
+        if let Some(op) = exit_node.operator_id.as_deref() {
+            excluded_ops.insert(op.to_owned());
+        }
 
-        // Pick entry — reject if it shares an IP with exit.
+        // Pick entry — reject if it shares an IP or operator_id with exit.
         let entry_node = Self::select_weighted_node(&entry_nodes, &mut rng)?;
         if !entry_node.address.ip().is_loopback() && excluded_ips.contains(&entry_node.address.ip())
         {
@@ -178,25 +182,37 @@ impl NodeRegistry {
                 "entry and exit share the same IP address".into(),
             ));
         }
+        if let Some(op) = entry_node.operator_id.as_deref() {
+            if excluded_ops.contains(op) {
+                return Err(RegistryError::InsufficientNodes(
+                    "entry and exit share the same operator_id".into(),
+                ));
+            }
+            excluded_ops.insert(op.to_owned());
+        }
         if !entry_node.address.ip().is_loopback() {
             excluded_ips.insert(entry_node.address.ip());
         }
 
-        // Pick each middle in turn, excluding any node whose IP is already in the
-        // circuit.  The exclusion set grows after every pick so middle-vs-middle
-        // conflicts are caught too.
+        // Pick each middle in turn; exclusion sets grow after every pick so
+        // middle-vs-middle IP and operator conflicts are caught too.
         let mut path = Vec::with_capacity(count);
         path.push(entry_node);
 
         let mut available_middles = middle_nodes;
         for slot in 0..middle_count {
             available_middles.retain(|n| {
-                n.address.ip().is_loopback() || !excluded_ips.contains(&n.address.ip())
+                let ip_ok = n.address.ip().is_loopback() || !excluded_ips.contains(&n.address.ip());
+                let op_ok = n
+                    .operator_id
+                    .as_deref()
+                    .is_none_or(|op| !excluded_ops.contains(op));
+                ip_ok && op_ok
             });
             let remaining_slots = middle_count - slot;
             if available_middles.len() < remaining_slots {
                 return Err(RegistryError::InsufficientNodes(format!(
-                    "Not enough unique-IP middle nodes: need {remaining_slots} more, {} remain",
+                    "Not enough unique-IP/operator middle nodes: need {remaining_slots} more, {} remain",
                     available_middles.len()
                 )));
             }
@@ -204,6 +220,9 @@ impl NodeRegistry {
             let node = available_middles.remove(idx);
             if !node.address.ip().is_loopback() {
                 excluded_ips.insert(node.address.ip());
+            }
+            if let Some(op) = node.operator_id.as_deref() {
+                excluded_ops.insert(op.to_owned());
             }
             path.push(node);
         }
@@ -856,5 +875,259 @@ mod tests {
 
         let err = reg.get_random_path(3).unwrap_err();
         assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    // ---- operator_id exclusion tests (Phase B) ----
+
+    fn make_node_with_ip_and_op(
+        id: &str,
+        node_type: NodeType,
+        ip: &str,
+        op: Option<&str>,
+        bw: u64,
+    ) -> NodeDescriptor {
+        let port: u16 = 9000 + id.bytes().map(|b| b as u16).sum::<u16>() % 1000;
+        let addr: std::net::SocketAddr = format!("{ip}:{port}").parse().unwrap();
+        let mut n = NodeDescriptor::new(
+            id.to_string(),
+            node_type,
+            addr,
+            PublicKey::new([0u8; 32]),
+            bw,
+            None,
+        );
+        n.operator_id = op.map(str::to_owned);
+        n
+    }
+
+    #[test]
+    fn test_operator_id_entry_exit_same() {
+        // Entry and exit tagged with same operator_id — must be rejected even on different IPs.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip_and_op(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            None,
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "exit-1",
+            NodeType::Exit,
+            "3.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+
+        let err = reg.get_random_path(3).unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_operator_id_middle_excluded() {
+        // middle-1 shares operator_id with entry — only middle-2 (untagged) is valid.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip_and_op(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-2",
+            NodeType::Middle,
+            "3.0.0.1",
+            None,
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "exit-1",
+            NodeType::Exit,
+            "4.0.0.1",
+            None,
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[1].node_id, "middle-2");
+    }
+
+    #[test]
+    fn test_operator_id_none_never_excluded() {
+        // All nodes have operator_id: None — path selection must succeed normally.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip_and_op(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            None,
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            None,
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "exit-1",
+            NodeType::Exit,
+            "3.0.0.1",
+            None,
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+    }
+
+    #[test]
+    fn test_operator_id_mixed() {
+        // entry tagged "alice", middle-1 also "alice", middle-2 untagged → middle-2 selected.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip_and_op(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-2",
+            NodeType::Middle,
+            "3.0.0.1",
+            None,
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "exit-1",
+            NodeType::Exit,
+            "4.0.0.1",
+            Some("bob"),
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[1].node_id, "middle-2");
+    }
+
+    #[test]
+    fn test_operator_id_8hop_fails_when_not_enough_untagged_middles() {
+        // 8 hops = 1 entry + 6 middles + 1 exit.
+        // entry + 2 middles share "alice" → only 5 middles remain after filtering → should fail.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip_and_op(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        // 2 middles tagged "alice" — both will be excluded
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-alice-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-alice-2",
+            NodeType::Middle,
+            "3.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        // 5 untagged middles — need 6, only 5 available after filtering
+        for i in 0..5_u8 {
+            reg.register_node(make_node_with_ip_and_op(
+                &format!("middle-{i}"),
+                NodeType::Middle,
+                &format!("10.0.{i}.1"),
+                None,
+                1_000_000,
+            ));
+        }
+        reg.register_node(make_node_with_ip_and_op(
+            "exit-1",
+            NodeType::Exit,
+            "20.0.0.1",
+            None,
+            1_000_000,
+        ));
+
+        let err = reg.get_random_path(8).unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_operator_id_8hop_succeeds_with_enough_untagged_middles() {
+        // 8 hops = 1 entry + 6 middles + 1 exit.
+        // entry + 1 middle share "alice" → 6 untagged middles remain → should succeed.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip_and_op(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        // 1 middle tagged "alice" — excluded
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-alice-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        // 6 untagged middles — exactly enough
+        for i in 0..6_u8 {
+            reg.register_node(make_node_with_ip_and_op(
+                &format!("middle-{i}"),
+                NodeType::Middle,
+                &format!("10.0.{i}.1"),
+                None,
+                1_000_000,
+            ));
+        }
+        reg.register_node(make_node_with_ip_and_op(
+            "exit-1",
+            NodeType::Exit,
+            "20.0.0.1",
+            None,
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(8).unwrap();
+        assert_eq!(path.len(), 8);
+        // No node in the path should have operator_id "alice" except entry
+        for hop in path.iter().skip(1) {
+            assert_ne!(hop.operator_id.as_deref(), Some("alice"));
+        }
     }
 }
