@@ -12,13 +12,6 @@ pub struct DiscoveryConfig {
     #[arg(long, default_value = "0.0.0.0")]
     pub host: String,
 
-    #[arg(
-        long,
-        env = "CONSENSUS_PATH",
-        default_value = "services/discovery/data/consensus.json"
-    )]
-    pub consensus_path: String,
-
     #[arg(long, default_value_t = false)]
     pub tui: bool,
 
@@ -44,6 +37,7 @@ mod tests {
         assert_eq!(config.host, "0.0.0.0");
         assert!(!config.tui);
         assert_eq!(config.stale_timeout_secs, 120);
+        // No consensus_path — persistence removed intentionally.
     }
 
     #[test]

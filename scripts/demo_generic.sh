@@ -317,8 +317,7 @@ echo ""
 
 section "Starting Discovery Service (port $DISCOVERY_PORT)"
 
-CONSENSUS_PATH="$ROOT_DIR/services/discovery/data/consensus.json" \
-    RUST_LOG="$RUST_LOG" \
+RUST_LOG="$RUST_LOG" \
     "$DISCOVERY_BIN" \
     > "$LOG_DIR/discovery.log" 2>&1 &
 PIDS+=($!)

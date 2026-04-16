@@ -3,7 +3,7 @@ use discovery::config::DiscoveryConfig;
 use discovery::metrics::{DiscoveryMetrics, EventKind};
 use discovery::registry::{AppState, NodeRegistry};
 use discovery::routes;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 #[tokio::main]
@@ -30,21 +30,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting Tor Directory Service...");
 
-    let consensus_path = PathBuf::from(&config.consensus_path);
-
-    if let Some(parent) = consensus_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut registry = NodeRegistry::new(consensus_path);
-
-    if let Err(e) = registry.load().await {
-        tracing::warn!("Failed to load consensus: {}", e);
-    }
-
-    let registry = Arc::new(RwLock::new(registry));
+    let registry = Arc::new(RwLock::new(NodeRegistry::new()));
 
     // Metrics are always created — TUI uses them for terminal display,
     // the web dashboard uses them for the /api/dashboard endpoint.
@@ -126,18 +112,6 @@ fn spawn_background_tasks(
     stale_timeout_secs: u64,
     metrics: Option<Arc<DiscoveryMetrics>>,
 ) {
-    let registry_save = registry.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            let registry = registry_save.read().await;
-            if let Err(e) = registry.save().await {
-                tracing::error!("Failed to save consensus: {}", e);
-            }
-        }
-    });
-
     let registry_cleanup = registry.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));

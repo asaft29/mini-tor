@@ -11,17 +11,14 @@ use discovery::registry::{AppState, NodeRegistry};
 use discovery::routes::build_router;
 use http::Request;
 use http_body_util::BodyExt;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-/// Build a fresh `AppState` (empty registry) with a throwaway consensus path.
+/// Build a fresh `AppState` (empty registry, no persistence).
 fn fresh_state() -> AppState {
     AppState {
-        registry: Arc::new(RwLock::new(NodeRegistry::new(PathBuf::from(
-            "/tmp/discovery-integration-test.json",
-        )))),
+        registry: Arc::new(RwLock::new(NodeRegistry::new())),
         metrics: None,
     }
 }

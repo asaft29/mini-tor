@@ -2,12 +2,10 @@ use crate::error::RegistryError;
 use crate::metrics::DiscoveryMetrics;
 use common::{NodeDescriptor, NodeType};
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::fs;
 
 /// Shared application state for Axum handlers.
 #[derive(Clone)]
@@ -30,22 +28,6 @@ impl NodeEntry {
             descriptor: d,
             registered_at: reg,
             last_heartbeat: last,
-        }
-    }
-}
-
-/// Consensus document for disk persistence.
-#[derive(Debug, Serialize, Deserialize)]
-struct Consensus {
-    generated_at: chrono::DateTime<chrono::Utc>,
-    nodes: Vec<NodeDescriptor>,
-}
-
-impl Consensus {
-    fn new(gen_at: chrono::DateTime<chrono::Utc>, nodes: Vec<NodeDescriptor>) -> Self {
-        Self {
-            generated_at: gen_at,
-            nodes,
         }
     }
 }
@@ -84,45 +66,19 @@ impl RegistryStats {
 /// Node registry storing all registered relay nodes.
 pub struct NodeRegistry {
     nodes: HashMap<String, NodeEntry>,
-    consensus_path: PathBuf,
+}
+
+impl Default for NodeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NodeRegistry {
-    pub fn new(consensus_path: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
-            consensus_path,
         }
-    }
-
-    pub async fn load(&mut self) -> anyhow::Result<()> {
-        if !self.consensus_path.exists() {
-            tracing::info!("No consensus file found, starting fresh");
-            return Ok(());
-        }
-
-        let data = fs::read_to_string(&self.consensus_path).await?;
-        let consensus: Consensus = serde_json::from_str(&data)?;
-
-        let now = Instant::now();
-        for node in consensus.nodes.into_iter() {
-            let node_id = node.node_id.clone();
-            let entry = NodeEntry::new(node, now, now);
-            self.nodes.insert(node_id, entry);
-        }
-
-        tracing::info!("Loaded {} nodes from consensus", self.nodes.len());
-        Ok(())
-    }
-
-    pub async fn save(&self) -> anyhow::Result<()> {
-        let consensus = Consensus::new(chrono::Utc::now(), self.get_all_nodes());
-
-        let json = serde_json::to_string_pretty(&consensus)?;
-        fs::write(&self.consensus_path, json).await?;
-
-        tracing::debug!("Saved consensus with {} nodes", self.nodes.len());
-        Ok(())
     }
 
     pub fn register_node(&mut self, descriptor: NodeDescriptor) {
@@ -204,18 +160,55 @@ impl NodeRegistry {
 
         let mut rng = rand::rng();
 
-        // Select middle nodes WITHOUT replacement so the same relay cannot appear
-        // twice in the same circuit (duplicate hops corrupt per-hop cipher state).
-        let mut available_middles = middle_nodes;
+        // Running set of IPs already committed to the circuit.
+        // Loopback addresses (127.x.x.x) are exempt so localhost demos still work.
+        let mut excluded_ips = std::collections::HashSet::<std::net::IpAddr>::new();
+
+        // Pick exit first — it has the most constraints (exit policy).
+        let exit_node = Self::select_weighted_node(&exit_nodes, &mut rng)?;
+        if !exit_node.address.ip().is_loopback() {
+            excluded_ips.insert(exit_node.address.ip());
+        }
+
+        // Pick entry — reject if it shares an IP with exit.
+        let entry_node = Self::select_weighted_node(&entry_nodes, &mut rng)?;
+        if !entry_node.address.ip().is_loopback() && excluded_ips.contains(&entry_node.address.ip())
+        {
+            return Err(RegistryError::InsufficientNodes(
+                "entry and exit share the same IP address".into(),
+            ));
+        }
+        if !entry_node.address.ip().is_loopback() {
+            excluded_ips.insert(entry_node.address.ip());
+        }
+
+        // Pick each middle in turn, excluding any node whose IP is already in the
+        // circuit.  The exclusion set grows after every pick so middle-vs-middle
+        // conflicts are caught too.
         let mut path = Vec::with_capacity(count);
-        path.push(Self::select_weighted_node(&entry_nodes, &mut rng)?);
-        for _ in 0..middle_count {
+        path.push(entry_node);
+
+        let mut available_middles = middle_nodes;
+        for slot in 0..middle_count {
+            available_middles.retain(|n| {
+                n.address.ip().is_loopback() || !excluded_ips.contains(&n.address.ip())
+            });
+            let remaining_slots = middle_count - slot;
+            if available_middles.len() < remaining_slots {
+                return Err(RegistryError::InsufficientNodes(format!(
+                    "Not enough unique-IP middle nodes: need {remaining_slots} more, {} remain",
+                    available_middles.len()
+                )));
+            }
             let idx = Self::select_weighted_index(&available_middles, &mut rng)?;
             let node = available_middles.remove(idx);
+            if !node.address.ip().is_loopback() {
+                excluded_ips.insert(node.address.ip());
+            }
             path.push(node);
         }
-        path.push(Self::select_weighted_node(&exit_nodes, &mut rng)?);
 
+        path.push(exit_node);
         Ok(path)
     }
 
@@ -236,7 +229,9 @@ impl NodeRegistry {
         rng: &mut R,
     ) -> Result<usize, RegistryError> {
         if nodes.is_empty() {
-            return Err(RegistryError::InsufficientNodes("Empty node list".to_string()));
+            return Err(RegistryError::InsufficientNodes(
+                "Empty node list".to_string(),
+            ));
         }
 
         let total_bandwidth: u64 = nodes.iter().map(|n| n.bandwidth).sum();
@@ -367,7 +362,7 @@ mod tests {
     }
 
     fn make_registry() -> NodeRegistry {
-        NodeRegistry::new(PathBuf::from("/tmp/test-consensus.json"))
+        NodeRegistry::new()
     }
 
     #[test]
@@ -639,6 +634,227 @@ mod tests {
         reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
 
         let err = reg.get_random_path(1).unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    // ---- IP exclusion tests (Phase A) ----
+
+    fn make_node_with_ip(id: &str, node_type: NodeType, ip: &str, bw: u64) -> NodeDescriptor {
+        // Derive a unique port from the id so nodes with the same IP but different
+        // ids get distinct SocketAddrs (registry.register_node evicts on address match).
+        let port: u16 = 9000 + id.bytes().map(|b| b as u16).sum::<u16>() % 1000;
+        let addr: std::net::SocketAddr = format!("{ip}:{port}").parse().unwrap();
+        NodeDescriptor::new(
+            id.to_string(),
+            node_type,
+            addr,
+            PublicKey::new([0u8; 32]),
+            bw,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_ip_exclusion_loopback_exempt() {
+        // All nodes on 127.0.0.1 — the loopback exemption must keep the demo working.
+        let mut reg = make_registry();
+        reg.register_node(make_node("entry-1", NodeType::Entry, 1_000_000));
+        reg.register_node(make_node("middle-1", NodeType::Middle, 1_000_000));
+        reg.register_node(make_node("exit-1", NodeType::Exit, 1_000_000));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+    }
+
+    #[test]
+    fn test_ip_exclusion_different_ips_succeeds() {
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "exit-1",
+            NodeType::Exit,
+            "3.0.0.1",
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0].node_type, NodeType::Entry);
+        assert_eq!(path[1].node_type, NodeType::Middle);
+        assert_eq!(path[2].node_type, NodeType::Exit);
+    }
+
+    #[test]
+    fn test_ip_exclusion_entry_exit_same_ip() {
+        // Entry and exit on the same non-loopback IP — must be rejected.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "exit-1",
+            NodeType::Exit,
+            "1.0.0.1",
+            1_000_000,
+        ));
+
+        let err = reg.get_random_path(3).unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
+    }
+
+    #[test]
+    fn test_ip_exclusion_middle_shares_entry_ip() {
+        // middle-1 shares IP with entry — only middle-2 is valid.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-1",
+            NodeType::Middle,
+            "1.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-2",
+            NodeType::Middle,
+            "2.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "exit-1",
+            NodeType::Exit,
+            "3.0.0.1",
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[1].node_id, "middle-2");
+    }
+
+    #[test]
+    fn test_ip_exclusion_middle_shares_exit_ip() {
+        // middle-1 shares IP with exit — only middle-2 is valid.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-1",
+            NodeType::Middle,
+            "3.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-2",
+            NodeType::Middle,
+            "2.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "exit-1",
+            NodeType::Exit,
+            "3.0.0.1",
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[1].node_id, "middle-2");
+    }
+
+    #[test]
+    fn test_ip_exclusion_two_middles_same_ip() {
+        // 4-hop circuit: middle-1 and middle-2 share an IP — only one can be picked.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-1",
+            NodeType::Middle,
+            "2.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-2",
+            NodeType::Middle,
+            "2.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-3",
+            NodeType::Middle,
+            "4.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "exit-1",
+            NodeType::Exit,
+            "3.0.0.1",
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(4).unwrap();
+        assert_eq!(path.len(), 4);
+        // The two middles must have different IPs.
+        assert_ne!(path[1].address.ip(), path[2].address.ip());
+    }
+
+    #[test]
+    fn test_ip_exclusion_not_enough_after_filter() {
+        // All middles share the entry IP — no valid middle remains.
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip(
+            "entry-1",
+            NodeType::Entry,
+            "1.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-1",
+            NodeType::Middle,
+            "1.0.0.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "exit-1",
+            NodeType::Exit,
+            "3.0.0.1",
+            1_000_000,
+        ));
+
+        let err = reg.get_random_path(3).unwrap_err();
         assert!(matches!(err, RegistryError::InsufficientNodes(_)));
     }
 }
