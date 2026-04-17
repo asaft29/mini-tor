@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         Arc::clone(&metrics),
         std::time::Duration::from_secs(5),
     );
-    spawn_circuit_keepalive(Arc::clone(&pool), std::time::Duration::from_secs(5));
+    spawn_circuit_keepalive(Arc::clone(&pool));
 
     let mut server = Socks5::bind(&config.socks_addr)
         .await

@@ -1,8 +1,8 @@
 //! Integration tests for the Tor circuit builder (`CircuitBuilder`).
 //!
-//! These tests simulate relay nodes using in-process TCP listeners that
+//! These tests simulate relay nodes using in-process TCP+TLS listeners that
 //! perform real ntor key exchange, validating the full telescopic
-//! handshake (CREATE + 2 EXTENDs) over loopback.
+//! handshake (CREATE + 2 EXTENDs) over TLS.
 //!
 //! The simulated relays use `CipherPair` (stateful AES-CTR with IV=0) to
 //! match the real relay implementation. The cipher state is accumulated
@@ -16,8 +16,11 @@
 )]
 
 use common::crypto::CipherPair;
-use common::{Message, MessageCommand, NodeDescriptor, NodeType, PublicKey};
-use rand::rngs::OsRng;
+use common::{
+    Message, MessageCommand, NodeDescriptor, NodeType, PublicKey, RelayStream, RelayTlsConfig,
+    server_name_from_addr,
+};
+use rand_core::OsRng;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tor_client::circuit::CircuitBuilder;
@@ -60,20 +63,34 @@ fn relay_ntor(
     (payload, session_key)
 }
 
+/// Accept a TLS connection on the given listener, perform TLS handshake,
+/// and return the TLS stream boxed as a RelayStream.
+async fn accept_tls(
+    listener: &TcpListener,
+    tls_acceptor: &tokio_rustls::TlsAcceptor,
+) -> (RelayStream, std::net::SocketAddr) {
+    let (tcp_stream, addr) = listener.accept().await.unwrap();
+    let tls_stream = tls_acceptor.accept(tcp_stream).await.unwrap();
+    (Box::new(tls_stream) as RelayStream, addr)
+}
+
 /// Spawn a simulated entry node that handles:
 /// 1. CREATE -> CREATED  (ntor handshake)
-/// 2. EXTEND -> connects to next hop, forwards CREATE, receives CREATED,
+/// 2. EXTEND -> connects to next hop via TLS, forwards CREATE, receives CREATED,
 ///    encrypts CREATED payload with backward cipher, sends EXTENDED back
 /// 3. Second EXTEND -> decrypts one layer (forward), forwards to middle,
 ///    reads EXTENDED from middle, adds backward layer, sends back
 ///
 /// Uses stateful `CipherPair` matching real relay behavior.
-async fn spawn_entry_relay(identity: RelayIdentity) -> std::net::SocketAddr {
+async fn spawn_entry_relay(
+    identity: RelayIdentity,
+    tls_acceptor: tokio_rustls::TlsAcceptor,
+) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = accept_tls(&listener, &tls_acceptor).await;
 
         // --- Step 1: Handle CREATE ---
         let create_msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
@@ -97,17 +114,25 @@ async fn spawn_entry_relay(identity: RelayIdentity) -> std::net::SocketAddr {
         let mut decrypted = extend_msg.data.clone();
         cipher.apply_forward(&mut decrypted);
 
-        // Parse "addr:port\0" + public_key
+        // Parse 3-field format: addr\0key\0fingerprint
         let null_pos = decrypted.iter().position(|&b| b == 0).unwrap();
         let addr_str = std::str::from_utf8(&decrypted[..null_pos]).unwrap();
         let next_hop_addr: std::net::SocketAddr = addr_str.parse().unwrap();
-        let inner_payload = &decrypted[null_pos + 1..];
+        // Next 32 bytes after the first null separator are the ephemeral key
+        let key_start = null_pos + 1;
+        let inner_payload = &decrypted[key_start..key_start + 32];
 
-        // Connect to middle node and forward CREATE
-        let mut next_stream = tokio::net::TcpStream::connect(next_hop_addr).await.unwrap();
+        // Connect to middle node via TLS
+        let middle_fingerprint = std::str::from_utf8(&decrypted[key_start + 33..]).unwrap();
+        let middle_tcp = tokio::net::TcpStream::connect(next_hop_addr).await.unwrap();
+        let connector = RelayTlsConfig::make_tls_connector(middle_fingerprint).unwrap();
+        let server_name = server_name_from_addr(next_hop_addr);
+        let middle_tls = connector.connect(server_name, middle_tcp).await.unwrap();
+        let mut next_stream: RelayStream = Box::new(middle_tls);
+
         let forward_create = Message::create(extend_msg.circuit_id, inner_payload.to_vec());
-        next_stream
-            .write_all(&forward_create.to_bytes())
+        forward_create
+            .write_to_stream(&mut next_stream)
             .await
             .unwrap();
 
@@ -134,7 +159,7 @@ async fn spawn_entry_relay(identity: RelayIdentity) -> std::net::SocketAddr {
 
         // Forward to middle as EXTEND
         let fwd_extend = Message::extend(extend2_msg.circuit_id, after_entry);
-        next_stream.write_all(&fwd_extend.to_bytes()).await.unwrap();
+        fwd_extend.write_to_stream(&mut next_stream).await.unwrap();
 
         // Read EXTENDED from middle
         let extended_from_middle = Message::from_stream(&mut next_stream)
@@ -155,16 +180,19 @@ async fn spawn_entry_relay(identity: RelayIdentity) -> std::net::SocketAddr {
 
 /// Spawn a simulated middle node that handles:
 /// 1. CREATE -> CREATED (ntor handshake)
-/// 2. EXTEND -> connects to exit, forwards CREATE, receives CREATED,
+/// 2. EXTEND -> connects to exit via TLS, forwards CREATE, receives CREATED,
 ///    encrypts with backward cipher, sends EXTENDED
 ///
 /// Uses stateful `CipherPair` matching real relay behavior.
-async fn spawn_middle_relay(identity: RelayIdentity) -> std::net::SocketAddr {
+async fn spawn_middle_relay(
+    identity: RelayIdentity,
+    tls_acceptor: tokio_rustls::TlsAcceptor,
+) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = accept_tls(&listener, &tls_acceptor).await;
 
         // Handle CREATE
         let create_msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
@@ -188,17 +216,24 @@ async fn spawn_middle_relay(identity: RelayIdentity) -> std::net::SocketAddr {
         let mut decrypted = extend_msg.data.clone();
         cipher.apply_forward(&mut decrypted);
 
-        // Parse "addr:port\0" + public_key
+        // Parse 3-field format: addr\0key\0fingerprint
         let null_pos = decrypted.iter().position(|&b| b == 0).unwrap();
         let addr_str = std::str::from_utf8(&decrypted[..null_pos]).unwrap();
         let exit_addr: std::net::SocketAddr = addr_str.parse().unwrap();
-        let inner_payload = &decrypted[null_pos + 1..];
+        let key_start = null_pos + 1;
+        let inner_payload = &decrypted[key_start..key_start + 32];
 
-        // Connect to exit node
-        let mut exit_stream = tokio::net::TcpStream::connect(exit_addr).await.unwrap();
+        // Connect to exit node via TLS
+        let exit_fingerprint = std::str::from_utf8(&decrypted[key_start + 33..]).unwrap();
+        let exit_tcp = tokio::net::TcpStream::connect(exit_addr).await.unwrap();
+        let connector = RelayTlsConfig::make_tls_connector(exit_fingerprint).unwrap();
+        let server_name = server_name_from_addr(exit_addr);
+        let exit_tls = connector.connect(server_name, exit_tcp).await.unwrap();
+        let mut exit_stream: RelayStream = Box::new(exit_tls);
+
         let forward_create = Message::create(extend_msg.circuit_id, inner_payload.to_vec());
-        exit_stream
-            .write_all(&forward_create.to_bytes())
+        forward_create
+            .write_to_stream(&mut exit_stream)
             .await
             .unwrap();
 
@@ -221,12 +256,15 @@ async fn spawn_middle_relay(identity: RelayIdentity) -> std::net::SocketAddr {
 
 /// Spawn a simulated exit node that handles:
 /// 1. CREATE -> CREATED (ntor handshake only)
-async fn spawn_exit_relay(identity: RelayIdentity) -> std::net::SocketAddr {
+async fn spawn_exit_relay(
+    identity: RelayIdentity,
+    tls_acceptor: tokio_rustls::TlsAcceptor,
+) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = accept_tls(&listener, &tls_acceptor).await;
 
         // Handle CREATE
         let create_msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
@@ -249,8 +287,12 @@ fn node_at(
     node_type: NodeType,
     addr: std::net::SocketAddr,
     public_key: PublicKey,
+    tls_cert_fingerprint: String,
 ) -> NodeDescriptor {
-    NodeDescriptor::new(id.to_string(), node_type, addr, public_key, 1_000_000, None)
+    let mut desc =
+        NodeDescriptor::new(id.to_string(), node_type, addr, public_key, 1_000_000, None);
+    desc.tls_cert_fingerprint = tls_cert_fingerprint;
+    desc
 }
 
 /// Full 3-hop telescopic handshake: CREATE + 2 EXTENDs
@@ -266,15 +308,31 @@ async fn test_full_telescopic_handshake() {
     let middle_pub = PublicKey::new(middle_id.public_bytes);
     let exit_pub = PublicKey::new(exit_id.public_bytes);
 
+    // Generate TLS configs for each relay
+    let entry_tls = RelayTlsConfig::generate("test-entry", "127.0.0.1:0".parse().unwrap()).unwrap();
+    let middle_tls =
+        RelayTlsConfig::generate("test-middle", "127.0.0.1:0".parse().unwrap()).unwrap();
+    let exit_tls = RelayTlsConfig::generate("test-exit", "127.0.0.1:0".parse().unwrap()).unwrap();
+
+    let entry_fp = entry_tls.fingerprint.clone();
+    let middle_fp = middle_tls.fingerprint.clone();
+    let exit_fp = exit_tls.fingerprint.clone();
+
     // Spawn simulated relays (order matters: exit first so its address is known)
-    let exit_addr = spawn_exit_relay(exit_id).await;
-    let middle_addr = spawn_middle_relay(middle_id).await;
-    let entry_addr = spawn_entry_relay(entry_id).await;
+    let exit_addr = spawn_exit_relay(exit_id, exit_tls.acceptor.clone()).await;
+    let middle_addr = spawn_middle_relay(middle_id, middle_tls.acceptor.clone()).await;
+    let entry_addr = spawn_entry_relay(entry_id, entry_tls.acceptor.clone()).await;
 
     let path = vec![
-        node_at("entry", NodeType::Entry, entry_addr, entry_pub),
-        node_at("middle", NodeType::Middle, middle_addr, middle_pub),
-        node_at("exit", NodeType::Exit, exit_addr, exit_pub),
+        node_at("entry", NodeType::Entry, entry_addr, entry_pub, entry_fp),
+        node_at(
+            "middle",
+            NodeType::Middle,
+            middle_addr,
+            middle_pub,
+            middle_fp,
+        ),
+        node_at("exit", NodeType::Exit, exit_addr, exit_pub, exit_fp),
     ];
 
     let built = CircuitBuilder::build(42, &path).await.unwrap();
@@ -301,6 +359,7 @@ async fn test_build_rejects_wrong_path_length() {
         NodeType::Entry,
         "127.0.0.1:1".parse().unwrap(),
         PublicKey::new([0u8; 32]),
+        String::new(),
     )];
 
     let result = CircuitBuilder::build(1, &path).await;
@@ -325,18 +384,21 @@ async fn test_build_fails_on_unreachable_entry() {
             NodeType::Entry,
             "127.0.0.1:1".parse().unwrap(),
             PublicKey::new([0u8; 32]),
+            String::new(),
         ),
         node_at(
             "middle",
             NodeType::Middle,
             "127.0.0.1:2".parse().unwrap(),
             PublicKey::new([0u8; 32]),
+            String::new(),
         ),
         node_at(
             "exit",
             NodeType::Exit,
             "127.0.0.1:3".parse().unwrap(),
             PublicKey::new([0u8; 32]),
+            String::new(),
         ),
     ];
 

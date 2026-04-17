@@ -8,6 +8,7 @@ use common::{
     CELL_SIZE, CircuitId, Message, MessageCommand, NodeDescriptor, RelayReadHalf, RelayStream,
     RelayTlsConfig, RelayWriteHalf, StreamId, server_name_from_addr,
 };
+use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -755,14 +756,14 @@ pub fn spawn_circuit_monitor(
     })
 }
 
-/// Sends a PADDING cell to the entry node on every `Ready` circuit every `interval`.
+/// Sends a PADDING cell to the entry node on every `Ready` circuit at random intervals.
 /// A write failure means the entry is dead; the circuit monitor will detect and rebuild.
-pub fn spawn_circuit_keepalive(
-    pool: Arc<Mutex<CircuitPool>>,
-    interval: Duration,
-) -> tokio::task::JoinHandle<()> {
+/// Uses the `max(X, Y)` distribution over `Uniform(1.5s, 9.5s)` to match real Tor's
+/// link padding — average interval ≈ 5.5s with natural variance.
+pub fn spawn_circuit_keepalive(pool: Arc<Mutex<CircuitPool>>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            let interval = random_padding_interval();
             tokio::time::sleep(interval).await;
 
             // Collect Arc clones first so we don't hold the pool lock during writes.
@@ -784,6 +785,16 @@ pub fn spawn_circuit_keepalive(
             }
         }
     })
+}
+
+/// Sample a random PADDING interval using the `max(X, Y)` distribution over
+/// `Uniform(1.5s, 9.5s)`. This creates a slight bias toward longer intervals,
+/// matching real Tor's link padding behavior. Average ≈ 5.5s.
+fn random_padding_interval() -> Duration {
+    let mut rng = rand::rng();
+    let a: f64 = rng.random_range(1.5..9.5);
+    let b: f64 = rng.random_range(1.5..9.5);
+    Duration::from_secs_f64(a.max(b))
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use crate::error::TorError;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
@@ -142,7 +143,10 @@ impl Message {
     }
 
     pub fn padding(circuit_id: CircuitId) -> Self {
-        Self::circuit(circuit_id, MessageCommand::Padding, vec![])
+        let payload_len = rand::rng().random_range(0..MAX_PAYLOAD_SIZE);
+        let mut data = vec![0u8; payload_len];
+        rand::rng().fill(&mut data[..]);
+        Self::circuit(circuit_id, MessageCommand::Padding, data)
     }
 
     pub fn begin(circuit_id: CircuitId, stream_id: StreamId, destination: Vec<u8>) -> Self {
@@ -162,6 +166,8 @@ impl Message {
     }
 
     /// Serialize to fixed-size 514-byte cell. Truncates data exceeding `MAX_PAYLOAD_SIZE`.
+    /// Unused bytes after the data payload are filled with random values
+    /// (matching the Tor specification for relay cell padding).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut cell = vec![0u8; CELL_SIZE];
 
@@ -198,6 +204,14 @@ impl Message {
             && let Some(src) = self.data.get(..data_len)
         {
             dest.copy_from_slice(src);
+        }
+
+        // Fill unused bytes with random data (Tor spec: padding SHOULD be random)
+        if data_len < MAX_PAYLOAD_SIZE {
+            let padding_start = DATA_START + data_len;
+            if let Some(padding_region) = cell.get_mut(padding_start..CELL_SIZE) {
+                rand::rng().fill(padding_region);
+            }
         }
 
         cell
@@ -421,10 +435,10 @@ mod tests {
         assert_eq!(bytes[17], 0xAA);
         assert_eq!(bytes[18], 0xBB);
 
-        // Padding (remaining bytes should be zero)
-        for &b in &bytes[19..CELL_SIZE] {
-            assert_eq!(b, 0, "Padding byte should be zero");
-        }
+        // Padding bytes are now random (not necessarily zero)
+        // Just verify they exist and the data roundtrips correctly
+        let msg2 = Message::from_bytes(&bytes).unwrap();
+        assert_eq!(msg2.data, msg.data);
     }
 
     #[test]
@@ -573,5 +587,64 @@ mod tests {
         assert_eq!(msg.stream_id, msg2.stream_id);
         assert_eq!(msg.command, msg2.command);
         assert_eq!(msg.data, msg2.data);
+    }
+
+    #[test]
+    fn test_padding_cell_has_random_data() {
+        let msg1 = Message::padding(42);
+        let msg2 = Message::padding(42);
+
+        // PADDING cells should have random payload length (0..MAX_PAYLOAD_SIZE)
+        assert!(msg1.data.len() < MAX_PAYLOAD_SIZE);
+        assert!(msg2.data.len() < MAX_PAYLOAD_SIZE);
+
+        // PADDING cells with random data are extremely unlikely to be identical
+        // (comparing both length and content)
+        let bytes1 = msg1.to_bytes();
+        let bytes2 = msg2.to_bytes();
+        // The padding regions should differ with overwhelming probability
+        assert_ne!(bytes1, bytes2, "Two PADDING cells should not be identical");
+    }
+
+    #[test]
+    fn test_padding_cell_roundtrip() {
+        let msg = Message::padding(99);
+        let bytes = msg.to_bytes();
+        assert_eq!(bytes.len(), CELL_SIZE);
+
+        let msg2 = Message::from_bytes(&bytes).unwrap();
+        assert_eq!(msg2.circuit_id, 99);
+        assert_eq!(msg2.command, MessageCommand::Padding);
+        // payload_len matches original data length
+        assert_eq!(msg2.data.len(), msg.data.len());
+    }
+
+    #[test]
+    fn test_random_padding_not_all_zeros() {
+        // Create a message with small data — the padding should be random, not all zeros
+        let msg = Message::data(1, 1, vec![0x42; 4]);
+        let bytes = msg.to_bytes();
+
+        // Data portion (bytes 17..21) should be [0x42, 0x42, 0x42, 0x42]
+        assert_eq!(bytes[17], 0x42);
+        assert_eq!(bytes[20], 0x42);
+
+        // With random padding, the bytes after data are extremely unlikely to all be zero
+        // Test this by creating many messages and checking that at least one has non-zero padding
+        let mut has_nonzero_padding = false;
+        for _ in 0..10 {
+            let m = Message::data(1, 1, vec![0x42; 4]);
+            let b = m.to_bytes();
+            // Check bytes 21 onward (after the 4 bytes of data)
+            let padding = &b[21..CELL_SIZE];
+            if padding.iter().any(|&x| x != 0) {
+                has_nonzero_padding = true;
+                break;
+            }
+        }
+        assert!(
+            has_nonzero_padding,
+            "At least one message should have non-zero random padding"
+        );
     }
 }
