@@ -2,12 +2,15 @@ use crate::circuit::handler::{CircuitContext, CircuitState, NextHop};
 use crate::keypair::KeyPair;
 use crate::metrics::{EventKind, RelayMetrics};
 use common::{
+    RelayStream, RelayTlsConfig, RelayWriteHalf,
     crypto::SessionKey,
     protocol::{CircuitId, Message, MessageCommand},
+    server_name_from_addr,
 };
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, WriteHalf};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
@@ -64,7 +67,7 @@ impl MiddleCircuitHandler {
         Ok(Some(msg))
     }
 
-    /// Handle EXTEND: decrypt payload, connect to next hop, return EXTENDED.
+    /// Handle EXTEND: decrypt payload, connect to next hop via TLS, return EXTENDED.
     async fn handle_extend(&mut self, msg: Message) -> anyhow::Result<Option<Message>> {
         info!(
             "Middle: Received EXTEND for circuit {}",
@@ -80,37 +83,61 @@ impl MiddleCircuitHandler {
         let mut decrypted = msg.data.clone();
         cipher_pair.apply_forward(&mut decrypted);
 
-        let null_pos = decrypted
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| anyhow::anyhow!("No null terminator in EXTEND address"))?;
-
-        let addr_str = std::str::from_utf8(
-            decrypted
-                .get(0..null_pos)
-                .ok_or(anyhow::anyhow!("Invalid EXTEND data"))?,
-        )?;
-        let addr: std::net::SocketAddr = addr_str.parse()?;
-
-        let key_start = null_pos + 1;
-        if decrypted.len() < key_start + 32 {
-            return Err(anyhow::anyhow!("EXTEND message missing public key"));
+        if decrypted.len() < 33 {
+            return Err(anyhow::anyhow!("EXTEND payload too short"));
         }
 
+        let addr_end = decrypted
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| anyhow::anyhow!("EXTEND payload missing address separator"))?;
+
+        let addr_bytes = decrypted
+            .get(0..addr_end)
+            .ok_or_else(|| anyhow::anyhow!("Invalid address in EXTEND payload"))?;
+        let addr_str = std::str::from_utf8(addr_bytes)?;
+
+        let key_start = addr_end + 1;
+        let key_end = key_start + 32;
+        if key_end > decrypted.len() {
+            return Err(anyhow::anyhow!("EXTEND payload too short for public key"));
+        }
         let mut client_public = [0u8; 32];
         client_public.copy_from_slice(
             decrypted
-                .get(key_start..key_start + 32)
-                .ok_or(anyhow::anyhow!("EXTEND message missing public key"))?,
+                .get(key_start..key_end)
+                .ok_or_else(|| anyhow::anyhow!("Invalid public key in EXTEND payload"))?,
         );
+
+        let fp_start_byte = decrypted
+            .get(key_end)
+            .ok_or_else(|| anyhow::anyhow!("EXTEND payload missing fingerprint separator"))?;
+        if *fp_start_byte != 0 {
+            return Err(anyhow::anyhow!(
+                "EXTEND payload missing fingerprint separator"
+            ));
+        }
+        let fingerprint = std::str::from_utf8(
+            decrypted
+                .get(key_end + 1..)
+                .ok_or_else(|| anyhow::anyhow!("EXTEND payload missing TLS fingerprint"))?,
+        )?;
+
+        let addr: SocketAddr = addr_str.parse()?;
 
         info!(
             "Middle: Extending to next hop at {} for circuit {}",
             addr, self.context.circuit_id
         );
 
-        let mut stream = TcpStream::connect(addr).await?;
-        debug!("Middle: Connected to next hop at {}", addr);
+        let tcp_stream = TcpStream::connect(addr_str).await?;
+        debug!("Middle: TCP connected to next hop at {}", addr);
+
+        let connector = RelayTlsConfig::make_tls_connector(fingerprint)?;
+        let server_name = server_name_from_addr(addr);
+        let tls_stream = connector.connect(server_name, tcp_stream).await?;
+        let mut stream: RelayStream = Box::new(tls_stream);
+        debug!("Middle: TLS connected to next hop at {}", addr);
 
         let create_msg = Message::create(self.context.circuit_id, client_public.to_vec());
 
@@ -310,7 +337,7 @@ impl MiddleCircuitHandler {
     pub fn spawn_nexthop_reader(
         &mut self,
         circuit_registry: Arc<Mutex<crate::circuit::handler::CircuitRegistry>>,
-        prev_hop_write: Arc<Mutex<WriteHalf<TcpStream>>>,
+        prev_hop_write: Arc<Mutex<RelayWriteHalf>>,
         metrics: Arc<RelayMetrics>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let circuit_id = self.context.circuit_id;
@@ -399,8 +426,8 @@ impl MiddleCircuitHandler {
 mod tests {
     use super::*;
     use crate::circuit::handler::CircuitState;
+    use common::RelayTlsConfig;
     use common::crypto::{CipherPair, NtorEphemeralKeyPair, ntor_client_finish_raw};
-    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     async fn do_ntor_create(
@@ -510,13 +537,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_middle_extend_to_exit_over_tcp() {
-        let exit_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let exit_addr = exit_listener.local_addr().unwrap();
         let exit_keypair = KeyPair::generate();
+
+        let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let exit_tls_config = RelayTlsConfig::generate("exit-node", bind_addr).unwrap();
+        let fingerprint = exit_tls_config.fingerprint.clone();
+        let exit_acceptor = exit_tls_config.acceptor.clone();
+
+        let tcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let exit_addr = tcp_listener.local_addr().unwrap();
 
         let exit_kp_clone = exit_keypair.clone();
         let exit_task = tokio::spawn(async move {
-            let (mut stream, _) = exit_listener.accept().await.unwrap();
+            let (tcp_stream, _) = tcp_listener.accept().await.unwrap();
+            let tls_stream = exit_acceptor.accept(tcp_stream).await.unwrap();
+            let mut stream: RelayStream = Box::new(tls_stream);
             let msg = Message::from_stream(&mut stream).await.unwrap().unwrap();
             assert_eq!(msg.command, MessageCommand::Create);
 
@@ -528,7 +563,7 @@ mod tests {
             payload.extend_from_slice(&server_eph_pub);
             payload.extend_from_slice(&auth);
             let created = Message::created(msg.circuit_id, payload);
-            stream.write_all(&created.to_bytes()).await.unwrap();
+            created.write_to_stream(&mut stream).await.unwrap();
         });
 
         let middle_keypair = KeyPair::generate();
@@ -543,6 +578,8 @@ mod tests {
         extend_payload.extend_from_slice(addr_str.as_bytes());
         extend_payload.push(0);
         extend_payload.extend_from_slice(&ephemeral_exit.public.bytes);
+        extend_payload.push(0);
+        extend_payload.extend_from_slice(fingerprint.as_bytes());
 
         let mut client_cipher = CipherPair::new(&middle_key);
         let mut encrypted = extend_payload.clone();

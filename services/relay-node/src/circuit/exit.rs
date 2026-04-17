@@ -2,13 +2,14 @@ use crate::circuit::handler::{CircuitContext, CircuitState};
 use crate::keypair::KeyPair;
 use crate::metrics::{EventKind, RelayMetrics};
 use common::{
+    RelayWriteHalf,
     crypto::{CipherPair, RunningDigest, SessionKey},
     metrics::Direction,
     protocol::{CircuitId, MAX_PAYLOAD_SIZE, Message, MessageCommand, StreamId},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -99,7 +100,7 @@ impl ExitCircuitHandler {
     async fn handle_begin(
         &mut self,
         msg: Message,
-        prev_hop_write: Arc<Mutex<WriteHalf<TcpStream>>>,
+        prev_hop_write: Arc<Mutex<RelayWriteHalf>>,
     ) -> anyhow::Result<Option<Message>> {
         info!(
             "Exit: Received BEGIN for circuit {} stream {}",
@@ -227,7 +228,7 @@ impl ExitCircuitHandler {
         stream_id: StreamId,
         destination_stream: TcpStream,
         shared_state: Arc<Mutex<ExitCryptoState>>,
-        prev_hop_write: Arc<Mutex<WriteHalf<TcpStream>>>,
+        prev_hop_write: Arc<Mutex<RelayWriteHalf>>,
         mut dest_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     ) -> tokio::task::JoinHandle<()> {
         let circuit_id = self.context.circuit_id;
@@ -526,7 +527,7 @@ impl ExitCircuitHandler {
     pub async fn handle_message(
         &mut self,
         msg: Message,
-        prev_hop_write: Option<Arc<Mutex<WriteHalf<TcpStream>>>>,
+        prev_hop_write: Option<Arc<Mutex<RelayWriteHalf>>>,
     ) -> anyhow::Result<Option<Message>> {
         match msg.command {
             MessageCommand::Create => self.handle_create(msg).await,
@@ -580,8 +581,10 @@ impl ExitCircuitHandler {
 mod tests {
     use super::*;
     use crate::circuit::handler::CircuitState;
+    use common::RelayStream;
     use common::crypto::{CipherPair, NtorEphemeralKeyPair, RunningDigest, ntor_client_finish_raw};
     use tokio::net::TcpListener;
+    use tokio::net::TcpStream;
 
     async fn setup_exit_handler(
         handler: &mut ExitCircuitHandler,
@@ -745,7 +748,8 @@ mod tests {
             tokio::spawn(async move { TcpStream::connect(prev_addr).await.unwrap() });
         let (prev_server, _) = prev_listener.accept().await.unwrap();
         let mut prev_client = prev_connect.await.unwrap();
-        let (_prev_read, prev_write) = tokio::io::split(prev_server);
+        let prev_boxed: RelayStream = Box::new(prev_server);
+        let (_prev_read, prev_write) = tokio::io::split(prev_boxed);
         let prev_hop_write = Arc::new(Mutex::new(prev_write));
 
         let dest_str = format!("{}\0", dest_addr);
@@ -793,7 +797,8 @@ mod tests {
             tokio::spawn(async move { TcpStream::connect(prev_addr).await.unwrap() });
         let (prev_server, _) = prev_listener.accept().await.unwrap();
         let _prev_client = prev_connect.await.unwrap();
-        let (_prev_read, prev_write) = tokio::io::split(prev_server);
+        let prev_boxed: RelayStream = Box::new(prev_server);
+        let (_prev_read, prev_write) = tokio::io::split(prev_boxed);
         let prev_hop_write = Arc::new(Mutex::new(prev_write));
 
         let dest_str = "127.0.0.1:1\0";

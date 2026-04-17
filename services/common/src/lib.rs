@@ -2,6 +2,7 @@ pub mod crypto;
 pub mod error;
 pub mod metrics;
 pub mod protocol;
+pub mod tls;
 pub mod types;
 
 pub use crypto::{
@@ -16,4 +17,7 @@ pub use protocol::{
     CELL_SIZE, CircuitId, DIGEST_SIZE, HEADER_SIZE, MAX_PAYLOAD_SIZE, Message, MessageCommand,
     StreamId,
 };
-pub use types::{ExitPolicy, NodeDescriptor, NodeType, PublicKey};
+pub use tls::{RelayTlsConfig, server_name_from_addr};
+pub use types::{
+    ExitPolicy, NodeDescriptor, NodeType, PublicKey, RelayReadHalf, RelayStream, RelayWriteHalf,
+};

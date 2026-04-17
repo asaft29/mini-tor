@@ -4,11 +4,13 @@ use crate::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
 use common::crypto::{CipherPair, NtorEphemeralKeyPair, SessionKey, ntor_client_finish_raw};
 use common::metrics::Direction;
-use common::{CELL_SIZE, CircuitId, Message, MessageCommand, NodeDescriptor, StreamId};
+use common::{
+    CELL_SIZE, CircuitId, Message, MessageCommand, NodeDescriptor, RelayReadHalf, RelayStream,
+    RelayTlsConfig, RelayWriteHalf, StreamId, server_name_from_addr,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
@@ -28,7 +30,7 @@ pub enum CircuitState {
 pub struct Circuit {
     pub circuit_id: CircuitId,
     pub state: CircuitState,
-    pub entry_writer: Arc<Mutex<WriteHalf<TcpStream>>>,
+    pub entry_writer: Arc<Mutex<RelayWriteHalf>>,
     pub onion_keys: OnionKeys,
     pub stream_senders: HashMap<StreamId, mpsc::UnboundedSender<Message>>,
     next_stream_id: StreamId,
@@ -100,7 +102,7 @@ impl Circuit {
 /// Result of building a circuit: the circuit itself and the read half for the reader task.
 pub struct BuiltCircuit {
     pub circuit: Circuit,
-    pub read_half: ReadHalf<TcpStream>,
+    pub read_half: RelayReadHalf,
 }
 
 /// Builds an N-hop circuit (N >= 3) via telescopic ntor handshake.
@@ -129,10 +131,23 @@ impl CircuitBuilder {
                 .join(" -> ")
         );
 
-        let mut entry_stream = TcpStream::connect(entry.address)
+        let tcp_stream = TcpStream::connect(entry.address)
             .await
-            .context("Failed to connect to entry node")?;
-        info!("Connected to entry node at {}", entry.address);
+            .with_context(|| format!("Failed to connect to entry node at {}", entry.address))?;
+        info!("TCP connected to entry node at {}", entry.address);
+
+        let connector = RelayTlsConfig::make_tls_connector(&entry.tls_cert_fingerprint)
+            .context("Failed to create TLS connector")?;
+        let server_name = server_name_from_addr(entry.address);
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .with_context(|| {
+                format!("TLS handshake with entry node at {} failed", entry.address)
+            })?;
+        info!("TLS connected to entry node at {}", entry.address);
+
+        let mut entry_stream: RelayStream = Box::new(tls_stream);
 
         // CREATE handshake with entry (hop 0).
         let entry_key = Self::handshake_create(circuit_id, &mut entry_stream, entry).await?;
@@ -180,7 +195,7 @@ impl CircuitBuilder {
     /// CREATE handshake with the entry node (ntor).
     async fn handshake_create(
         circuit_id: CircuitId,
-        stream: &mut TcpStream,
+        stream: &mut RelayStream,
         entry: &NodeDescriptor,
     ) -> Result<SessionKey> {
         let ephemeral = NtorEphemeralKeyPair::generate();
@@ -246,7 +261,7 @@ impl CircuitBuilder {
     /// is unwrapped in the same order before ntor verification.
     async fn handshake_extend(
         circuit_id: CircuitId,
-        stream: &mut TcpStream,
+        stream: &mut RelayStream,
         node: &NodeDescriptor,
         ciphers: &mut [CipherPair],
     ) -> Result<SessionKey> {
@@ -254,10 +269,12 @@ impl CircuitBuilder {
         let our_public = ephemeral.public.bytes;
 
         let addr_str = node.address.to_string();
-        let mut extend_payload = Vec::with_capacity(addr_str.len() + 1 + 32);
+        let mut extend_payload = Vec::with_capacity(addr_str.len() + 1 + 32 + 1 + 64);
         extend_payload.extend_from_slice(addr_str.as_bytes());
         extend_payload.push(0);
         extend_payload.extend_from_slice(&our_public);
+        extend_payload.push(0);
+        extend_payload.extend_from_slice(node.tls_cert_fingerprint.as_bytes());
 
         // Wrap in k layers: innermost (last cipher) first, outermost (first cipher) last.
         for cipher in ciphers.iter_mut().rev() {
@@ -371,7 +388,7 @@ impl CircuitPool {
     }
 
     /// Pre-build circuits to fill the pool at startup.
-    pub async fn initialize(&mut self) -> Result<Vec<(Arc<Mutex<Circuit>>, ReadHalf<TcpStream>)>> {
+    pub async fn initialize(&mut self) -> Result<Vec<(Arc<Mutex<Circuit>>, RelayReadHalf)>> {
         info!("Initializing circuit pool with {} circuits", self.pool_size);
 
         let mut results = Vec::with_capacity(self.pool_size);
@@ -407,9 +424,7 @@ impl CircuitPool {
     }
 
     /// Select the least-loaded ready circuit for a new stream.
-    pub async fn select_circuit(
-        &mut self,
-    ) -> Result<(Arc<Mutex<Circuit>>, Option<ReadHalf<TcpStream>>)> {
+    pub async fn select_circuit(&mut self) -> Result<(Arc<Mutex<Circuit>>, Option<RelayReadHalf>)> {
         let mut best: Option<(CircuitId, usize)> = None;
 
         for (&circuit_id, circuit) in &self.circuits {
@@ -454,7 +469,7 @@ impl CircuitPool {
     pub async fn replace_circuit(
         &mut self,
         failed_id: CircuitId,
-    ) -> Result<(Arc<Mutex<Circuit>>, ReadHalf<TcpStream>)> {
+    ) -> Result<(Arc<Mutex<Circuit>>, RelayReadHalf)> {
         info!("Replacing failed circuit {}", failed_id);
         self.circuits.remove(&failed_id);
         let build_result = self.build_circuit().await;
@@ -509,7 +524,7 @@ impl CircuitPool {
         Ok((Arc::clone(circuit), read_half))
     }
 
-    async fn build_circuit(&mut self) -> Result<(CircuitId, ReadHalf<TcpStream>)> {
+    async fn build_circuit(&mut self) -> Result<(CircuitId, RelayReadHalf)> {
         let circuit_id = self.allocate_circuit_id();
         let path = self
             .directory_client
@@ -566,7 +581,7 @@ impl CircuitPool {
 /// decrypts onion layers, and demuxes them to the correct stream channel.
 pub fn spawn_circuit_reader(
     circuit: Arc<Mutex<Circuit>>,
-    mut read_half: ReadHalf<TcpStream>,
+    mut read_half: RelayReadHalf,
     metrics: Arc<ClientMetrics>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

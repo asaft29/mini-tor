@@ -1,5 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
+
+/// Trait that combines AsyncRead + AsyncWrite for boxed relay streams.
+pub trait RelayStreamTrait: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> RelayStreamTrait for T {}
+
+/// A boxed stream that implements AsyncRead + AsyncWrite + Unpin + Send.
+/// Used to abstract over TLS and plain TCP streams in relay-to-relay connections.
+pub type RelayStream = Box<dyn RelayStreamTrait>;
+
+/// Read half of a RelayStream.
+pub type RelayReadHalf = ReadHalf<RelayStream>;
+
+/// Write half of a RelayStream.
+pub type RelayWriteHalf = WriteHalf<RelayStream>;
 
 /// Node type in the Tor network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
@@ -153,6 +169,11 @@ pub struct NodeDescriptor {
     /// are on different IP addresses. Purely opt-in — `None` means no grouping.
     #[serde(default)]
     pub operator_id: Option<String>,
+
+    /// SHA-256 hex fingerprint of this relay's self-signed TLS certificate.
+    /// Used by peers to verify the relay's identity during TLS handshake.
+    #[serde(default)]
+    pub tls_cert_fingerprint: String,
 }
 
 impl NodeDescriptor {
@@ -172,6 +193,7 @@ impl NodeDescriptor {
             bandwidth,
             exit_policy,
             operator_id: None,
+            tls_cert_fingerprint: String::new(),
         }
     }
 

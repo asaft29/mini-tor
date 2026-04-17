@@ -45,4 +45,10 @@ pub enum TorError {
 
     #[error("ntor handshake AUTH verification failed — possible MITM")]
     HandshakeAuthFailed,
+
+    #[error("TLS handshake failed: {0}")]
+    TlsHandshake(String),
+
+    #[error("Certificate fingerprint mismatch: expected {expected}, got {got}")]
+    CertificateFingerprintMismatch { expected: String, got: String },
 }

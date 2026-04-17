@@ -3,13 +3,13 @@ use crate::circuit::exit::ExitCircuitHandler;
 use crate::circuit::middle::MiddleCircuitHandler;
 use crate::metrics::RelayMetrics;
 use common::{
+    RelayReadHalf, RelayStream, RelayWriteHalf,
     crypto::{CipherPair, SessionKey},
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -31,9 +31,7 @@ impl CircuitHandler {
     pub async fn handle_message(
         &mut self,
         msg: Message,
-        prev_hop_write: Option<
-            std::sync::Arc<tokio::sync::Mutex<WriteHalf<tokio::net::TcpStream>>>,
-        >,
+        prev_hop_write: Option<Arc<Mutex<RelayWriteHalf>>>,
     ) -> anyhow::Result<Option<Message>> {
         match self {
             CircuitHandler::Entry(handler) => handler.handle_message(msg).await,
@@ -88,8 +86,8 @@ impl CircuitHandler {
 
     pub fn spawn_nexthop_reader(
         &mut self,
-        circuit_registry: std::sync::Arc<tokio::sync::Mutex<CircuitRegistry>>,
-        client_write: std::sync::Arc<tokio::sync::Mutex<WriteHalf<TcpStream>>>,
+        circuit_registry: Arc<Mutex<CircuitRegistry>>,
+        client_write: Arc<Mutex<RelayWriteHalf>>,
         metrics: Arc<RelayMetrics>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         match self {
@@ -147,9 +145,7 @@ impl CircuitRegistry {
     pub async fn handle_message(
         &mut self,
         msg: Message,
-        prev_hop_write: Option<
-            std::sync::Arc<tokio::sync::Mutex<WriteHalf<tokio::net::TcpStream>>>,
-        >,
+        prev_hop_write: Option<Arc<Mutex<RelayWriteHalf>>>,
     ) -> anyhow::Result<Option<Message>> {
         let circuit_id = msg.circuit_id;
 
@@ -219,12 +215,12 @@ impl CircuitContext {
 }
 
 pub struct NextHop {
-    pub write: WriteHalf<TcpStream>,
-    pub read: Option<ReadHalf<TcpStream>>,
+    pub write: RelayWriteHalf,
+    pub read: Option<RelayReadHalf>,
 }
 
 impl NextHop {
-    pub fn new(stream: TcpStream) -> Self {
+    pub fn new(stream: RelayStream) -> Self {
         let (read, write) = tokio::io::split(stream);
         Self {
             write,
@@ -232,7 +228,7 @@ impl NextHop {
         }
     }
 
-    pub fn take_read(&mut self) -> Option<ReadHalf<TcpStream>> {
+    pub fn take_read(&mut self) -> Option<RelayReadHalf> {
         self.read.take()
     }
 }

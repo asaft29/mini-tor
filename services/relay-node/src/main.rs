@@ -4,24 +4,24 @@ mod keypair;
 mod metrics;
 mod tui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use circuit::{
     CircuitHandler, CircuitRegistry, EntryCircuitHandler, ExitCircuitHandler, MiddleCircuitHandler,
 };
 use clap::Parser;
-use common::{NodeDescriptor, protocol::Message};
+use common::{NodeDescriptor, RelayStream, RelayTlsConfig, RelayWriteHalf, protocol::Message};
 use config::RelayConfig;
 use keypair::KeyPair;
 use metrics::{EventKind, RelayMetrics};
 use reqwest::Client;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
-    io::WriteHalf,
     net::TcpListener,
     signal,
     sync::Mutex,
     time::{Duration, interval},
 };
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -64,6 +64,10 @@ async fn main() -> Result<()> {
     let node_id = Uuid::new_v4().to_string();
     info!("  Node ID: {}", node_id);
 
+    let tls_config = RelayTlsConfig::generate(&node_id, bind_addr)
+        .context("Failed to generate TLS certificate")?;
+    info!("  TLS fingerprint: {}", tls_config.fingerprint);
+
     let descriptor = NodeDescriptor {
         node_id: node_id.clone(),
         node_type: config.node_type,
@@ -72,6 +76,7 @@ async fn main() -> Result<()> {
         bandwidth: config.bandwidth,
         exit_policy: config.exit_policy(),
         operator_id: config.operator_id.clone(),
+        tls_cert_fingerprint: tls_config.fingerprint.clone(),
     };
 
     let http_client = Client::new();
@@ -97,6 +102,7 @@ async fn main() -> Result<()> {
         keypair,
         config.node_type,
         relay_metrics.clone(),
+        tls_config.acceptor,
     ));
 
     info!("Relay node started successfully. Press Ctrl+C to stop.");
@@ -248,11 +254,12 @@ async fn accept_connections(
     keypair: KeyPair,
     node_type: common::NodeType,
     metrics: Arc<RelayMetrics>,
+    tls_acceptor: TlsAcceptor,
 ) {
     loop {
         match listener.accept().await {
-            Ok((stream, addr)) => {
-                info!("Accepted connection from {}", addr);
+            Ok((tcp_stream, addr)) => {
+                info!("Accepted TCP connection from {}", addr);
 
                 metrics
                     .connections_accepted
@@ -264,7 +271,19 @@ async fn accept_connections(
                 let registry = circuit_registry.clone();
                 let kp = keypair.clone();
                 let m = metrics.clone();
-                tokio::spawn(handle_connection(stream, addr, registry, kp, node_type, m));
+                let tls_acceptor = tls_acceptor.clone();
+                tokio::spawn(async move {
+                    match tls_acceptor.accept(tcp_stream).await {
+                        Ok(tls_stream) => {
+                            info!("TLS handshake completed for {}", addr);
+                            let stream: RelayStream = Box::new(tls_stream);
+                            handle_connection(stream, addr, registry, kp, node_type, m).await;
+                        }
+                        Err(e) => {
+                            error!("TLS handshake failed for {}: {}", addr, e);
+                        }
+                    }
+                });
             }
             Err(e) => {
                 error!("Failed to accept connection: {}", e);
@@ -273,12 +292,12 @@ async fn accept_connections(
     }
 }
 
-/// Handle a single TCP connection.
+/// Handle a single TLS connection.
 ///
 /// Read half is used directly in the main loop; write half is shared with
 /// background tasks via Arc<Mutex> to avoid deadlocks on bidirectional I/O.
 async fn handle_connection(
-    stream: tokio::net::TcpStream,
+    stream: RelayStream,
     addr: SocketAddr,
     circuit_registry: Arc<Mutex<CircuitRegistry>>,
     keypair: KeyPair,
@@ -288,7 +307,7 @@ async fn handle_connection(
     info!("Handling connection from {}", addr);
 
     let (mut read_half, write_half) = tokio::io::split(stream);
-    let write_arc: Arc<Mutex<WriteHalf<tokio::net::TcpStream>>> = Arc::new(Mutex::new(write_half));
+    let write_arc: Arc<Mutex<RelayWriteHalf>> = Arc::new(Mutex::new(write_half));
 
     loop {
         let msg_result = Message::from_stream(&mut read_half).await;
