@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[command(about = "Tor-like relay node", long_about = None)]
 pub struct RelayConfig {
     #[arg(long, value_parser = parse_node_type)]
-    pub node_type: NodeType,
+    pub node_type: Option<NodeType>,
 
     #[arg(long, default_value = "9001")]
     pub port: u16,
@@ -43,8 +43,8 @@ impl RelayConfig {
         Ok(SocketAddr::new(ip, self.port))
     }
 
-    pub fn exit_policy(&self) -> Option<ExitPolicy> {
-        if self.node_type == NodeType::Exit {
+    pub fn exit_policy(&self, node_type: NodeType) -> Option<ExitPolicy> {
+        if node_type == NodeType::Exit {
             Some(if self.exit_allow_all {
                 ExitPolicy {
                     allowed_ports: vec![],
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn test_bind_addr() {
         let config = RelayConfig {
-            node_type: NodeType::Entry,
+            node_type: Some(NodeType::Entry),
             port: 9001,
             host: "127.0.0.1".to_string(),
             directory_url: "http://localhost:8080".to_string(),
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn test_exit_policy_for_exit_node() {
         let config = RelayConfig {
-            node_type: NodeType::Exit,
+            node_type: Some(NodeType::Exit),
             port: 9001,
             host: "127.0.0.1".to_string(),
             directory_url: "http://localhost:8080".to_string(),
@@ -134,7 +134,7 @@ mod tests {
             operator_id: None,
         };
 
-        let policy = config.exit_policy();
+        let policy = config.exit_policy(NodeType::Exit);
         assert!(policy.is_some());
         let policy = policy.ok_or("no policy").ok();
         assert!(policy.is_some());
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn test_no_exit_policy_for_non_exit() {
         let config = RelayConfig {
-            node_type: NodeType::Middle,
+            node_type: Some(NodeType::Middle),
             port: 9001,
             host: "127.0.0.1".to_string(),
             directory_url: "http://localhost:8080".to_string(),
@@ -154,6 +154,6 @@ mod tests {
             operator_id: None,
         };
 
-        assert!(config.exit_policy().is_none());
+        assert!(config.exit_policy(NodeType::Middle).is_none());
     }
 }

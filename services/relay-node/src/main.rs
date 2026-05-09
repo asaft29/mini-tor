@@ -1,5 +1,6 @@
 mod circuit;
 mod config;
+mod config_wizard;
 mod keypair;
 mod metrics;
 mod tui;
@@ -27,7 +28,15 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = RelayConfig::parse();
+    let mut config = RelayConfig::parse();
+
+    if config.tui && config.node_type.is_none() {
+        config = config_wizard::run_wizard(&config)?;
+    }
+
+    let node_type = config.node_type.ok_or_else(|| {
+        anyhow::anyhow!("--type is required (or use --tui for interactive setup)")
+    })?;
 
     if config.tui {
         use tracing_subscriber::fmt::writer::MakeWriterExt;
@@ -48,7 +57,7 @@ async fn main() -> Result<()> {
     }
 
     info!("Starting relay node");
-    info!("  Node type: {:?}", config.node_type);
+    info!("  Node type: {:?}", node_type);
     info!("  Bind address: {}:{}", config.host, config.port);
     info!("  Directory URL: {}", config.directory_url);
     info!("  Bandwidth: {} bytes/sec", config.bandwidth);
@@ -70,11 +79,11 @@ async fn main() -> Result<()> {
 
     let descriptor = NodeDescriptor {
         node_id: node_id.clone(),
-        node_type: config.node_type,
+        node_type,
         address: bind_addr,
         public_key: keypair.public_key().clone(),
         bandwidth: config.bandwidth,
-        exit_policy: config.exit_policy(),
+        exit_policy: config.exit_policy(node_type),
         operator_id: config.operator_id.clone(),
         tls_cert_fingerprint: tls_config.fingerprint.clone(),
     };
@@ -100,7 +109,7 @@ async fn main() -> Result<()> {
         listener,
         circuit_registry.clone(),
         keypair,
-        config.node_type,
+        node_type,
         relay_metrics.clone(),
         tls_config.acceptor,
     ));
@@ -110,7 +119,7 @@ async fn main() -> Result<()> {
     if config.tui {
         let tui_metrics = relay_metrics.clone();
         let tui_registry = circuit_registry.clone();
-        let tui_node_type = config.node_type;
+        let tui_node_type = node_type;
         let tui_addr = bind_addr.to_string();
 
         let tui_handle = tokio::spawn(async move {

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use dialoguer::{Confirm, theme::ColorfulTheme};
 use simple_socks5::conn::reply::Rep;
 use simple_socks5::conn::request::CMD;
 use simple_socks5::parse::AddrPort;
@@ -19,23 +18,22 @@ use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = TorClientConfig::parse();
+    let mut config = TorClientConfig::parse();
 
-    // Prompt for explicit confirmation before building a maximum-size circuit.
-    // Do this before initializing logging so the prompt is always visible.
-    if config.hops == MAX_HOPS {
-        let confirmed = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!(
-                "You requested a {MAX_HOPS}-hop circuit (the maximum).\n  \
-                 This requires {MAX_HOPS} relay nodes and adds significant latency.\n  \
-                 A {MAX_HOPS}-node circuit will be built: 1 entry + {} middles + 1 exit.\n  \
-                 Do you understand and want to proceed?",
-                MAX_HOPS - 2
-            ))
-            .default(false)
-            .interact()
+    if config.tui {
+        config = tor_client::config_wizard::run_wizard(&config)?;
+    } else if config.hops == MAX_HOPS {
+        eprintln!(
+            "You requested a {MAX_HOPS}-hop circuit (the maximum).\n  \
+             This requires {MAX_HOPS} relay nodes and adds significant latency.\n  \
+             Proceed? [y/N]"
+        );
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
             .context("Failed to read confirmation")?;
-
+        let confirmed =
+            input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes");
         if !confirmed {
             eprintln!("Aborted. Use --hops <3-9> for a smaller circuit.");
             std::process::exit(0);

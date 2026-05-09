@@ -16,7 +16,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 ratatui = "0.29"
 crossterm = "0.28"
-dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 
 [lints]
 workspace = true
