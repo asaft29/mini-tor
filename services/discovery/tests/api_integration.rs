@@ -18,7 +18,7 @@ use tower::ServiceExt;
 /// Build a fresh `AppState` (empty registry, no persistence).
 fn fresh_state() -> AppState {
     AppState {
-        registry: Arc::new(RwLock::new(NodeRegistry::new())),
+        registry: Arc::new(RwLock::new(NodeRegistry::new(false))),
         metrics: None,
     }
 }

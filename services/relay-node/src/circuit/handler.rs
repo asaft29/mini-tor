@@ -142,6 +142,13 @@ impl CircuitRegistry {
         self.circuits.len()
     }
 
+    pub fn circuit_summaries(&self) -> Vec<(CircuitId, CircuitState)> {
+        self.circuits
+            .iter()
+            .map(|(id, handler)| (*id, handler.state()))
+            .collect()
+    }
+
     pub async fn handle_message(
         &mut self,
         msg: Message,

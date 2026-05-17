@@ -17,6 +17,9 @@ pub struct DiscoveryConfig {
 
     #[arg(long, default_value = "120")]
     pub stale_timeout_secs: u64,
+
+    #[arg(long, default_value_t = false)]
+    pub allow_same_ip: bool,
 }
 
 impl DiscoveryConfig {
@@ -37,7 +40,13 @@ mod tests {
         assert_eq!(config.host, "0.0.0.0");
         assert!(!config.tui);
         assert_eq!(config.stale_timeout_secs, 120);
-        // No consensus_path — persistence removed intentionally.
+        assert!(!config.allow_same_ip);
+    }
+
+    #[test]
+    fn test_allow_same_ip_flag() {
+        let config = DiscoveryConfig::parse_from(["discovery", "--allow-same-ip"]);
+        assert!(config.allow_same_ip);
     }
 
     #[test]

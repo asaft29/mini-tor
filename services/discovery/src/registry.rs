@@ -66,18 +66,20 @@ impl RegistryStats {
 /// Node registry storing all registered relay nodes.
 pub struct NodeRegistry {
     nodes: HashMap<String, NodeEntry>,
+    allow_same_ip: bool,
 }
 
 impl Default for NodeRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
 impl NodeRegistry {
-    pub fn new() -> Self {
+    pub fn new(allow_same_ip: bool) -> Self {
         Self {
             nodes: HashMap::new(),
+            allow_same_ip,
         }
     }
 
@@ -162,12 +164,13 @@ impl NodeRegistry {
 
         // Running exclusion sets for IPs and operator families already committed
         // to the circuit. Loopback IPs are exempt so localhost demos still work.
+        // When --allow-same-ip is set, IP exclusion is skipped entirely.
         let mut excluded_ips = std::collections::HashSet::<std::net::IpAddr>::new();
         let mut excluded_ops = std::collections::HashSet::<String>::new();
 
         // Pick exit first — it has the most constraints (exit policy).
         let exit_node = Self::select_weighted_node(&exit_nodes, &mut rng)?;
-        if !exit_node.address.ip().is_loopback() {
+        if !self.allow_same_ip && !exit_node.address.ip().is_loopback() {
             excluded_ips.insert(exit_node.address.ip());
         }
         if let Some(op) = exit_node.operator_id.as_deref() {
@@ -176,7 +179,9 @@ impl NodeRegistry {
 
         // Pick entry — reject if it shares an IP or operator_id with exit.
         let entry_node = Self::select_weighted_node(&entry_nodes, &mut rng)?;
-        if !entry_node.address.ip().is_loopback() && excluded_ips.contains(&entry_node.address.ip())
+        if !self.allow_same_ip
+            && !entry_node.address.ip().is_loopback()
+            && excluded_ips.contains(&entry_node.address.ip())
         {
             return Err(RegistryError::InsufficientNodes(
                 "entry and exit share the same IP address".into(),
@@ -190,7 +195,7 @@ impl NodeRegistry {
             }
             excluded_ops.insert(op.to_owned());
         }
-        if !entry_node.address.ip().is_loopback() {
+        if !self.allow_same_ip && !entry_node.address.ip().is_loopback() {
             excluded_ips.insert(entry_node.address.ip());
         }
 
@@ -202,7 +207,9 @@ impl NodeRegistry {
         let mut available_middles = middle_nodes;
         for slot in 0..middle_count {
             available_middles.retain(|n| {
-                let ip_ok = n.address.ip().is_loopback() || !excluded_ips.contains(&n.address.ip());
+                let ip_ok = self.allow_same_ip
+                    || n.address.ip().is_loopback()
+                    || !excluded_ips.contains(&n.address.ip());
                 let op_ok = n
                     .operator_id
                     .as_deref()
@@ -218,7 +225,7 @@ impl NodeRegistry {
             }
             let idx = Self::select_weighted_index(&available_middles, &mut rng)?;
             let node = available_middles.remove(idx);
-            if !node.address.ip().is_loopback() {
+            if !self.allow_same_ip && !node.address.ip().is_loopback() {
                 excluded_ips.insert(node.address.ip());
             }
             if let Some(op) = node.operator_id.as_deref() {
@@ -381,7 +388,11 @@ mod tests {
     }
 
     fn make_registry() -> NodeRegistry {
-        NodeRegistry::new()
+        NodeRegistry::new(false)
+    }
+
+    fn make_registry_allow_same_ip() -> NodeRegistry {
+        NodeRegistry::new(true)
     }
 
     #[test]
@@ -1129,5 +1140,92 @@ mod tests {
         for hop in path.iter().skip(1) {
             assert_ne!(hop.operator_id.as_deref(), Some("alice"));
         }
+    }
+
+    // ---- allow_same_ip tests ----
+
+    #[test]
+    fn test_allow_same_ip_non_loopback_succeeds() {
+        let mut reg = make_registry_allow_same_ip();
+        reg.register_node(make_node_with_ip(
+            "entry-1",
+            NodeType::Entry,
+            "5.5.5.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "middle-1",
+            NodeType::Middle,
+            "5.5.5.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "exit-1",
+            NodeType::Exit,
+            "5.5.5.1",
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+    }
+
+    #[test]
+    fn test_allow_same_ip_operator_exclusion_still_works() {
+        let mut reg = make_registry_allow_same_ip();
+        reg.register_node(make_node_with_ip_and_op(
+            "entry-1",
+            NodeType::Entry,
+            "5.5.5.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-alice",
+            NodeType::Middle,
+            "5.5.5.1",
+            Some("alice"),
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "middle-bob",
+            NodeType::Middle,
+            "5.5.5.1",
+            None,
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip_and_op(
+            "exit-1",
+            NodeType::Exit,
+            "5.5.5.1",
+            None,
+            1_000_000,
+        ));
+
+        let path = reg.get_random_path(3).unwrap();
+        assert_eq!(path.len(), 3);
+        for hop in path.iter().skip(1) {
+            assert_ne!(hop.operator_id.as_deref(), Some("alice"));
+        }
+    }
+
+    #[test]
+    fn test_allow_same_ip_disabled_same_ip_fails() {
+        let mut reg = make_registry();
+        reg.register_node(make_node_with_ip(
+            "entry-1",
+            NodeType::Entry,
+            "5.5.5.1",
+            1_000_000,
+        ));
+        reg.register_node(make_node_with_ip(
+            "exit-1",
+            NodeType::Exit,
+            "5.5.5.1",
+            1_000_000,
+        ));
+
+        let err = reg.get_random_path(3).unwrap_err();
+        assert!(matches!(err, RegistryError::InsufficientNodes(_)));
     }
 }

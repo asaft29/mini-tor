@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting Tor Directory Service...");
 
-    let registry = Arc::new(RwLock::new(NodeRegistry::new()));
+    let registry = Arc::new(RwLock::new(NodeRegistry::new(config.allow_same_ip)));
 
     // Metrics are always created — TUI uses them for terminal display,
     // the web dashboard uses them for the /api/dashboard endpoint.
