@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 use axum::body::Body;
-use common::{NodeDescriptor, NodeType, PublicKey};
+use common::{NodeDescriptor, NodeMetrics, NodeType, PublicKey};
 use discovery::registry::{AppState, NodeRegistry};
 use discovery::routes::build_router;
 use http::Request;
@@ -174,11 +174,13 @@ async fn test_heartbeat_success() {
     let state = fresh_state();
     register(&state, &make_node("node-1", NodeType::Entry, 1_000_000)).await;
 
+    let metrics = NodeMetrics::default();
     let app = build_router(state.clone());
     let req = Request::builder()
         .method("POST")
         .uri("/api/nodes/node-1/heartbeat")
-        .body(Body::empty())
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&metrics).unwrap()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
 
@@ -189,11 +191,13 @@ async fn test_heartbeat_success() {
 async fn test_heartbeat_not_found() {
     let state = fresh_state();
 
+    let metrics = NodeMetrics::default();
     let app = build_router(state);
     let req = Request::builder()
         .method("POST")
         .uri("/api/nodes/nonexistent/heartbeat")
-        .body(Body::empty())
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&metrics).unwrap()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
 

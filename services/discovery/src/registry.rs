@@ -1,6 +1,6 @@
 use crate::error::RegistryError;
 use crate::metrics::DiscoveryMetrics;
-use common::{NodeDescriptor, NodeType};
+use common::{NodeDescriptor, NodeMetrics, NodeType};
 use rand::Rng;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -20,6 +20,7 @@ pub struct NodeEntry {
     pub descriptor: NodeDescriptor,
     pub registered_at: Instant,
     pub last_heartbeat: Instant,
+    pub metrics: Option<NodeMetrics>,
 }
 
 impl NodeEntry {
@@ -28,6 +29,7 @@ impl NodeEntry {
             descriptor: d,
             registered_at: reg,
             last_heartbeat: last,
+            metrics: None,
         }
     }
 }
@@ -112,6 +114,10 @@ impl NodeRegistry {
             .values()
             .map(|entry| entry.descriptor.clone())
             .collect()
+    }
+
+    pub fn get_all_entries(&self) -> Vec<&NodeEntry> {
+        self.nodes.values().collect()
     }
 
     pub(crate) fn get_nodes_by_type(&self, node_type: NodeType) -> Vec<NodeDescriptor> {
@@ -286,6 +292,22 @@ impl NodeRegistry {
 
         entry.last_heartbeat = Instant::now();
         tracing::debug!("Updated heartbeat for node: {}", node_id);
+        Ok(())
+    }
+
+    pub fn update_heartbeat_with_metrics(
+        &mut self,
+        node_id: &str,
+        metrics: NodeMetrics,
+    ) -> Result<(), RegistryError> {
+        let entry = self
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| RegistryError::NodeNotFound(node_id.to_string()))?;
+
+        entry.last_heartbeat = Instant::now();
+        entry.metrics = Some(metrics);
+        tracing::debug!("Updated heartbeat (with metrics) for node: {}", node_id);
         Ok(())
     }
 

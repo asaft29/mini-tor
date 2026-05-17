@@ -10,7 +10,9 @@ use circuit::{
     CircuitHandler, CircuitRegistry, EntryCircuitHandler, ExitCircuitHandler, MiddleCircuitHandler,
 };
 use clap::Parser;
-use common::{NodeDescriptor, RelayStream, RelayTlsConfig, RelayWriteHalf, protocol::Message};
+use common::{
+    NodeDescriptor, NodeMetrics, RelayStream, RelayTlsConfig, RelayWriteHalf, protocol::Message,
+};
 use config::RelayConfig;
 use keypair::KeyPair;
 use metrics::{EventKind, RelayMetrics};
@@ -103,6 +105,8 @@ async fn main() -> Result<()> {
         config.directory_url.clone(),
         node_id.clone(),
         config.heartbeat_interval,
+        circuit_registry.clone(),
+        relay_metrics.clone(),
     ));
 
     let connection_handle = tokio::spawn(accept_connections(
@@ -235,6 +239,8 @@ async fn heartbeat_loop(
     directory_url: String,
     node_id: String,
     interval_secs: u64,
+    circuit_registry: Arc<Mutex<CircuitRegistry>>,
+    metrics: Arc<RelayMetrics>,
 ) {
     let mut ticker = interval(Duration::from_secs(interval_secs));
 
@@ -243,9 +249,20 @@ async fn heartbeat_loop(
 
         let url = format!("{}/api/nodes/{}/heartbeat", directory_url, node_id);
 
-        match client.post(&url).send().await {
+        let body = NodeMetrics {
+            connections_accepted: metrics.get_connections(),
+            circuits_active: circuit_registry.lock().await.circuit_count() as u64,
+            circuits_created: metrics.get_circuits_created(),
+            circuits_destroyed: metrics.get_circuits_destroyed(),
+            bytes_forwarded: metrics.get_bytes_forwarded(),
+            bytes_received: metrics.get_bytes_received(),
+            streams_opened: metrics.get_streams_opened(),
+            uptime_secs: metrics.uptime().as_secs(),
+        };
+
+        match client.post(&url).json(&body).send().await {
             Ok(response) if response.status().is_success() => {
-                info!("Heartbeat sent successfully");
+                debug!("Heartbeat sent successfully");
             }
             Ok(response) => {
                 warn!("Heartbeat failed with status: {}", response.status());

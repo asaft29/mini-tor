@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
-use common::NodeDescriptor;
+use common::{NodeDescriptor, NodeMetrics};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use utoipa::ToSchema;
@@ -131,6 +131,7 @@ pub async fn get_random_path(
     params(
         ("id" = String, Path, description = "Node ID")
     ),
+    request_body = NodeMetrics,
     responses(
         (status = 200, description = "Heartbeat updated successfully"),
         (status = 404, description = "Node not found")
@@ -140,9 +141,10 @@ pub async fn get_random_path(
 pub async fn update_heartbeat(
     State(state): State<AppState>,
     Path(node_id): Path<String>,
+    Json(metrics): Json<NodeMetrics>,
 ) -> Result<impl IntoResponse> {
     let mut registry = state.registry.write().await;
-    registry.update_heartbeat(&node_id)?;
+    registry.update_heartbeat_with_metrics(&node_id, metrics)?;
 
     if let Some(m) = &state.metrics {
         m.heartbeats.fetch_add(1, Ordering::Relaxed);
@@ -290,10 +292,18 @@ pub struct EventEntry {
     pub detail: String,
 }
 
+/// A node descriptor combined with live metrics for the web dashboard.
+#[derive(Debug, Serialize)]
+pub struct NodeWithMetrics {
+    #[serde(flatten)]
+    pub descriptor: NodeDescriptor,
+    pub metrics: Option<NodeMetrics>,
+}
+
 /// Combined response for the web dashboard — nodes, stats, metrics, and activity log.
 #[derive(Debug, Serialize)]
 pub struct DashboardResponse {
-    pub nodes: Vec<NodeDescriptor>,
+    pub nodes: Vec<NodeWithMetrics>,
     pub stats: RegistryStats,
     pub metrics: MetricsSummary,
     pub ready: bool,
@@ -344,7 +354,14 @@ fn event_to_entry(e: &common::metrics::TuiEvent<EventKind>) -> EventEntry {
 /// Single endpoint for the web dashboard UI (polled every 3 s).
 pub async fn dashboard_handler(State(state): State<AppState>) -> Json<DashboardResponse> {
     let registry = state.registry.read().await;
-    let nodes = registry.get_all_nodes();
+    let nodes: Vec<NodeWithMetrics> = registry
+        .get_all_entries()
+        .into_iter()
+        .map(|e| NodeWithMetrics {
+            descriptor: e.descriptor.clone(),
+            metrics: e.metrics.clone(),
+        })
+        .collect();
     let stats = registry.get_stats();
     let ready = registry.is_ready();
     drop(registry);

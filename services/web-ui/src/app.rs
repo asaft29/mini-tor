@@ -1,7 +1,20 @@
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use serde::Deserialize;
+use std::collections::HashSet;
 use wasm_bindgen_futures::spawn_local;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NodeMetricsUI {
+    pub connections_accepted: u64,
+    pub circuits_active: u64,
+    pub circuits_created: u64,
+    pub circuits_destroyed: u64,
+    pub bytes_forwarded: u64,
+    pub bytes_received: u64,
+    pub streams_opened: u64,
+    pub uptime_secs: u64,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NodeInfo {
@@ -9,6 +22,7 @@ pub struct NodeInfo {
     pub node_type: String,
     pub address: String,
     pub bandwidth: u64,
+    pub metrics: Option<NodeMetricsUI>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +80,21 @@ fn format_bandwidth(bps: u64) -> String {
     }
 }
 
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn format_uptime(secs: u64) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
@@ -82,7 +111,11 @@ fn format_elapsed(secs: f64) -> String {
 }
 
 #[component]
-fn NodeRow(node: NodeInfo) -> impl IntoView {
+fn NodeRow(
+    node: NodeInfo,
+    expanded: ReadSignal<HashSet<String>>,
+    set_expanded: WriteSignal<HashSet<String>>,
+) -> impl IntoView {
     let type_class = match node.node_type.as_str() {
         "Entry" => "type-badge type-entry",
         "Middle" => "type-badge type-middle",
@@ -94,14 +127,102 @@ fn NodeRow(node: NodeInfo) -> impl IntoView {
     let node_type = node.node_type.clone();
     let address = node.address.clone();
     let full_id = node.node_id.clone();
+    let node_id = node.node_id.clone();
+
+    let circuits_active = node
+        .metrics
+        .as_ref()
+        .map_or(0, |m| m.circuits_active);
+    let data_summary = node
+        .metrics
+        .as_ref()
+        .map_or("—".to_string(), |m| format_bytes(m.bytes_forwarded));
+
+    let nid_click = node_id.clone();
+    let onclick = move |_| {
+        set_expanded.update(|set| {
+            if set.contains(&nid_click) {
+                set.remove(&nid_click);
+            } else {
+                set.insert(nid_click.clone());
+            }
+        });
+    };
+
+    let nid_for_expanded = node_id.clone();
+    let node_metrics = node.metrics.clone();
+    let nid_for_detail = node_id.clone();
 
     view! {
-        <tr>
-            <td class="mono" title=full_id>{short_id}"..."</td>
+        <tr class="node-row" on:click={onclick}>
+            <td class="mono" title=full_id>
+                <span class="expand-icon">{move || if expanded.get().contains(&nid_for_expanded) { "▼" } else { "▶" }}</span>
+                " " {short_id}"..."
+            </td>
             <td><span class=type_class>{node_type}</span></td>
             <td class="mono">{address}</td>
             <td class="right mono">{bw}</td>
+            <td class="right mono">{circuits_active}</td>
+            <td class="right mono">{data_summary}</td>
         </tr>
+        {move || if expanded.get().contains(&nid_for_detail) {
+            match &node_metrics {
+                None => view! {
+                    <tr class="detail-row">
+                        <td colspan="6">
+                            <div class="detail-card">
+                                <div class="detail-empty">"Waiting for metrics..."</div>
+                            </div>
+                        </td>
+                    </tr>
+                }.into_any(),
+                Some(m) => {
+                    let uptime = format_uptime(m.uptime_secs);
+                    let fwd = format_bytes(m.bytes_forwarded);
+                    let recv = format_bytes(m.bytes_received);
+                    let conns = m.connections_accepted;
+                    let streams = m.streams_opened;
+                    let created = m.circuits_created;
+                    let destroyed = m.circuits_destroyed;
+                    view! {
+                        <tr class="detail-row">
+                            <td colspan="6">
+                                <div class="detail-card">
+                                    <div class="detail-grid">
+                                        <div class="detail-item">
+                                            <span class="detail-label">"Uptime"</span>
+                                            <span class="detail-value">{uptime}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">"Connections"</span>
+                                            <span class="detail-value">{conns}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">"Streams"</span>
+                                            <span class="detail-value">{streams}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">"Circuits"</span>
+                                            <span class="detail-value">{created}" created / " {destroyed}" destroyed"</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">"Forward"</span>
+                                            <span class="detail-value">{fwd}</span>
+                                        </div>
+                                        <div class="detail-item">
+                                            <span class="detail-label">"Received"</span>
+                                            <span class="detail-value">{recv}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                    }.into_any()
+                }
+            }
+        } else {
+            ().into_any()
+        }}
     }
 }
 
@@ -124,6 +245,7 @@ fn EventRow(entry: EventEntry) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     let data: RwSignal<Option<DashboardData>> = RwSignal::new(None);
+    let (expanded_nodes, set_expanded_nodes) = signal(HashSet::<String>::new());
 
     spawn_local(async move {
         loop {
@@ -174,19 +296,21 @@ pub fn App() -> impl IntoView {
                         <th>"Type"</th>
                         <th>"Address"</th>
                         <th class="right">"Bandwidth"</th>
+                        <th class="right">"Circ"</th>
+                        <th class="right">"Data"</th>
                     </tr>
                 </thead>
                 <tbody>
                     {move || match data.get() {
                         None => view! {
-                            <tr class="empty-row"><td colspan="4">"Connecting to discovery service..."</td></tr>
+                            <tr class="empty-row"><td colspan="6">"Connecting to discovery service..."</td></tr>
                         }.into_any(),
                         Some(d) if d.nodes.is_empty() => view! {
-                            <tr class="empty-row"><td colspan="4">"No relay nodes registered"</td></tr>
+                            <tr class="empty-row"><td colspan="6">"No relay nodes registered"</td></tr>
                         }.into_any(),
                         Some(d) => d.nodes
                             .into_iter()
-                            .map(|n| view! { <NodeRow node=n/> })
+                            .map(|n| view! { <NodeRow node=n.clone() expanded=expanded_nodes set_expanded=set_expanded_nodes/> })
                             .collect_view()
                             .into_any(),
                     }}

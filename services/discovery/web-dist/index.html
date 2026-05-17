@@ -6,8 +6,8 @@
     <title>Tor Discovery Service</title>
     
 <script type="module">
-import init, * as bindings from '/web-ui-8ffe24297ec5f5e6.js';
-const wasm = await init({ module_or_path: '/web-ui-8ffe24297ec5f5e6_bg.wasm' });
+import init, * as bindings from '/web-ui-40b96b1f6ec2e963.js';
+const wasm = await init({ module_or_path: '/web-ui-40b96b1f6ec2e963_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -146,6 +146,69 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             background: rgba(255, 255, 255, 0.025);
         }
 
+        .node-row {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .node-row:hover td {
+            background: rgba(88, 166, 255, 0.06) !important;
+        }
+
+        .expand-icon {
+            display: inline-block;
+            width: 16px;
+            font-size: 10px;
+            color: var(--text-muted);
+            transition: transform 0.15s;
+        }
+
+        .detail-row td {
+            padding: 0 !important;
+            border-bottom: 1px solid var(--border);
+            background: rgba(0, 0, 0, 0.18);
+        }
+
+        .detail-card {
+            padding: 14px 20px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .detail-empty {
+            text-align: center;
+            font-style: italic;
+            color: var(--text-muted);
+            padding: 8px 0;
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 10px 24px;
+        }
+
+        .detail-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 8px;
+        }
+
+        .detail-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            flex-shrink: 0;
+        }
+
+        .detail-value {
+            color: var(--text);
+            font-family: 'Courier New', Courier, monospace;
+            text-align: right;
+        }
+
         .right { text-align: right; }
 
         .mono {
@@ -260,6 +323,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         }
         .stat-sep strong { color: var(--text); }
     </style>
-<link rel="modulepreload" href="/web-ui-8ffe24297ec5f5e6.js" crossorigin="anonymous" integrity="sha384-zxcdrXwS2gXCkRnqjiOcmDbUJfyofhPQLU+2zIpglU2825QrGr2l7I36Tcdghbd3"><link rel="preload" href="/web-ui-8ffe24297ec5f5e6_bg.wasm" crossorigin="anonymous" integrity="sha384-xBhLsTglgYRi5HFeiUNkmgLhByBnMQhps5DxTtjMbnfyY4nFmwUR0q0LpyLfxjGC" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/web-ui-40b96b1f6ec2e963.js" crossorigin="anonymous" integrity="sha384-bGuxVtVD+1GKytzKAD3/y2ue7BbRMcBbb0TOemoKsj0ekF5OGRQ6bc4zzSuDwa+H"><link rel="preload" href="/web-ui-40b96b1f6ec2e963_bg.wasm" crossorigin="anonymous" integrity="sha384-mJOILzUIdrBKCBMIMqOA9DzkkbzbVSurOEyyYJazI+jyQcKgp22g1mc/yY6+NbzF" as="fetch" type="application/wasm"></head>
 <body></body>
 </html>

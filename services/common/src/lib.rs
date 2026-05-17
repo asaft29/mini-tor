@@ -19,5 +19,6 @@ pub use protocol::{
 };
 pub use tls::{RelayTlsConfig, server_name_from_addr};
 pub use types::{
-    ExitPolicy, NodeDescriptor, NodeType, PublicKey, RelayReadHalf, RelayStream, RelayWriteHalf,
+    ExitPolicy, NodeDescriptor, NodeMetrics, NodeType, PublicKey, RelayReadHalf, RelayStream,
+    RelayWriteHalf,
 };

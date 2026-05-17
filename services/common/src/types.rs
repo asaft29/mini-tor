@@ -176,6 +176,19 @@ pub struct NodeDescriptor {
     pub tls_cert_fingerprint: String,
 }
 
+/// Live metrics snapshot sent by a relay node during heartbeat.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
+pub struct NodeMetrics {
+    pub connections_accepted: u64,
+    pub circuits_active: u64,
+    pub circuits_created: u64,
+    pub circuits_destroyed: u64,
+    pub bytes_forwarded: u64,
+    pub bytes_received: u64,
+    pub streams_opened: u64,
+    pub uptime_secs: u64,
+}
+
 impl NodeDescriptor {
     pub fn new(
         node_id: String,
