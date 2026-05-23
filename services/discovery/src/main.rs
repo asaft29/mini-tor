@@ -4,7 +4,7 @@ use discovery::grpc::DiscoveryServiceImpl;
 use discovery::metrics::{DiscoveryMetrics, EventKind};
 use discovery::registry::{AppState, NodeRegistry};
 use discovery::routes;
-use proto::discovery::discovery_server::DiscoveryServer;
+use proto::services::discovery_server::DiscoveryServer;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let grpc_svc = DiscoveryServiceImpl::new(state.clone());
 
     let reflection_service = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(proto::discovery::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(proto::services::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();

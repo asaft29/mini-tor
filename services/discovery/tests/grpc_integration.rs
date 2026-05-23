@@ -7,7 +7,7 @@
 use common::{NodeDescriptor, NodeMetrics, NodeType, PublicKey};
 use discovery::grpc::DiscoveryServiceImpl;
 use discovery::registry::{AppState, NodeRegistry};
-use proto::discovery::{
+use proto::services::{
     GetAllNodesResponse, GetRandomPathRequest, HeartbeatRequest, RemoveNodeRequest,
     discovery_client::DiscoveryClient, discovery_server::DiscoveryServer,
 };
@@ -68,7 +68,7 @@ async fn register_three_nodes(client: &mut DiscoveryClient<Channel>) {
         make_node("exit-1", NodeType::Exit, 3_000_000),
     ];
     for node in &nodes {
-        let proto_node: proto::discovery::NodeDescriptor = node.clone().into();
+        let proto_node: proto::types::NodeDescriptor = node.clone().into();
         client
             .register_node(tonic::Request::new(proto_node))
             .await
@@ -82,7 +82,7 @@ async fn test_register_node_success() {
     let mut client = start_test_server(state).await;
 
     let node = make_node("node-1", NodeType::Entry, 1_000_000);
-    let proto_node: proto::discovery::NodeDescriptor = node.into();
+    let proto_node: proto::types::NodeDescriptor = node.into();
     let response = client.register_node(tonic::Request::new(proto_node)).await;
     assert!(response.is_ok());
 }
@@ -93,7 +93,7 @@ async fn test_register_node_empty_id_returns_error() {
     let mut client = start_test_server(state).await;
 
     let node = make_node("", NodeType::Entry, 1_000_000);
-    let proto_node: proto::discovery::NodeDescriptor = node.into();
+    let proto_node: proto::types::NodeDescriptor = node.into();
     let response = client.register_node(tonic::Request::new(proto_node)).await;
     assert!(response.is_err());
     let status = response.unwrap_err();
@@ -106,7 +106,7 @@ async fn test_register_node_zero_bandwidth_returns_error() {
     let mut client = start_test_server(state).await;
 
     let node = make_node("node-1", NodeType::Entry, 0);
-    let proto_node: proto::discovery::NodeDescriptor = node.into();
+    let proto_node: proto::types::NodeDescriptor = node.into();
     let response = client.register_node(tonic::Request::new(proto_node)).await;
     assert!(response.is_err());
     let status = response.unwrap_err();
@@ -148,9 +148,9 @@ async fn test_get_random_path_success() {
     let response = client.get_random_path(request).await.unwrap();
     let path = response.into_inner().nodes;
     assert_eq!(path.len(), 3);
-    assert_eq!(path[0].node_type(), proto::discovery::NodeType::Entry);
-    assert_eq!(path[1].node_type(), proto::discovery::NodeType::Middle);
-    assert_eq!(path[2].node_type(), proto::discovery::NodeType::Exit);
+    assert_eq!(path[0].node_type(), proto::types::NodeType::Entry);
+    assert_eq!(path[1].node_type(), proto::types::NodeType::Middle);
+    assert_eq!(path[2].node_type(), proto::types::NodeType::Exit);
 }
 
 #[tokio::test]
@@ -159,7 +159,7 @@ async fn test_get_random_path_insufficient_nodes_returns_error() {
     let mut client = start_test_server(state).await;
 
     let node = make_node("entry-1", NodeType::Entry, 1_000_000);
-    let proto_node: proto::discovery::NodeDescriptor = node.into();
+    let proto_node: proto::types::NodeDescriptor = node.into();
     client
         .register_node(tonic::Request::new(proto_node))
         .await
@@ -178,13 +178,13 @@ async fn test_heartbeat_success() {
     let mut client = start_test_server(state).await;
 
     let node = make_node("node-1", NodeType::Entry, 1_000_000);
-    let proto_node: proto::discovery::NodeDescriptor = node.into();
+    let proto_node: proto::types::NodeDescriptor = node.into();
     client
         .register_node(tonic::Request::new(proto_node))
         .await
         .unwrap();
 
-    let metrics: proto::discovery::NodeMetrics = NodeMetrics::default().into();
+    let metrics: proto::types::NodeMetrics = NodeMetrics::default().into();
     let request = tonic::Request::new(HeartbeatRequest {
         node_id: "node-1".to_string(),
         metrics: Some(metrics),
@@ -198,7 +198,7 @@ async fn test_heartbeat_not_found() {
     let state = fresh_state();
     let mut client = start_test_server(state).await;
 
-    let metrics: proto::discovery::NodeMetrics = NodeMetrics::default().into();
+    let metrics: proto::types::NodeMetrics = NodeMetrics::default().into();
     let request = tonic::Request::new(HeartbeatRequest {
         node_id: "nonexistent".to_string(),
         metrics: Some(metrics),
@@ -215,7 +215,7 @@ async fn test_remove_node_success() {
     let mut client = start_test_server(state).await;
 
     let node = make_node("node-1", NodeType::Entry, 1_000_000);
-    let proto_node: proto::discovery::NodeDescriptor = node.into();
+    let proto_node: proto::types::NodeDescriptor = node.into();
     client
         .register_node(tonic::Request::new(proto_node))
         .await

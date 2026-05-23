@@ -1,57 +1,9 @@
 syntax = "proto3";
 
-package discovery;
+package discovery.services;
 
+import "types.proto";
 import "google/protobuf/empty.proto";
-
-enum NodeType {
-  NODE_TYPE_UNSPECIFIED = 0;
-  ENTRY = 1;
-  MIDDLE = 2;
-  EXIT = 3;
-}
-
-message PublicKey {
-  bytes bytes = 1;  // 32 bytes X25519 public key
-}
-
-message ExitPolicy {
-  repeated uint32 allowed_ports = 1;
-  repeated uint32 blocked_ports = 2;
-  repeated bytes allowed_ips = 3;   // 4 or 16 bytes
-  repeated bytes blocked_ips = 4;   // 4 or 16 bytes
-}
-
-message NodeDescriptor {
-  string node_id = 1;
-  NodeType node_type = 2;
-  string address = 3;               // "ip:port"
-  PublicKey public_key = 4;
-  uint64 bandwidth = 5;
-  optional ExitPolicy exit_policy = 6;
-  optional string operator_id = 7;
-  string tls_cert_fingerprint = 8;
-}
-
-message NodeMetrics {
-  uint64 connections_accepted = 1;
-  uint64 circuits_active = 2;
-  uint64 circuits_created = 3;
-  uint64 circuits_destroyed = 4;
-  uint64 bytes_forwarded = 5;
-  uint64 bytes_received = 6;
-  uint64 streams_opened = 7;
-  uint64 uptime_secs = 8;
-}
-
-message RegistryStats {
-  uint64 total_nodes = 1;
-  uint64 entry_count = 2;
-  uint64 middle_count = 3;
-  uint64 exit_count = 4;
-  optional uint64 oldest_node_age_secs = 5;
-  optional uint64 newest_node_age_secs = 6;
-}
 
 message RegisterResponse {
   string message = 1;
@@ -59,7 +11,7 @@ message RegisterResponse {
 
 message HeartbeatRequest {
   string node_id = 1;
-  NodeMetrics metrics = 2;
+  discovery.types.NodeMetrics metrics = 2;
 }
 
 message RemoveNodeRequest {
@@ -71,11 +23,11 @@ message GetRandomPathRequest {
 }
 
 message GetRandomPathResponse {
-  repeated NodeDescriptor nodes = 1;
+  repeated discovery.types.NodeDescriptor nodes = 1;
 }
 
 message GetAllNodesResponse {
-  repeated NodeDescriptor nodes = 1;
+  repeated discovery.types.NodeDescriptor nodes = 1;
   uint64 count = 2;
 }
 
@@ -91,7 +43,7 @@ service Discovery {
   rpc ReadinessCheck(google.protobuf.Empty) returns (google.protobuf.Empty);
 
   // Node management
-  rpc RegisterNode(NodeDescriptor) returns (RegisterResponse);
+  rpc RegisterNode(discovery.types.NodeDescriptor) returns (RegisterResponse);
   rpc RemoveNode(RemoveNodeRequest) returns (google.protobuf.Empty);
 
   // Heartbeat
@@ -100,5 +52,5 @@ service Discovery {
   // Query
   rpc GetAllNodes(google.protobuf.Empty) returns (GetAllNodesResponse);
   rpc GetRandomPath(GetRandomPathRequest) returns (GetRandomPathResponse);
-  rpc GetStats(google.protobuf.Empty) returns (RegistryStats);
+  rpc GetStats(google.protobuf.Empty) returns (discovery.types.RegistryStats);
 }

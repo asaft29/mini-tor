@@ -1,11 +1,11 @@
 use crate::error::RegistryError;
 use crate::metrics::EventKind;
 use crate::registry::AppState;
-use proto::discovery::{
+use proto::services::{
     GetAllNodesResponse, GetRandomPathRequest, GetRandomPathResponse, HealthCheckResponse,
-    HeartbeatRequest, NodeDescriptor as ProtoNodeDescriptor, RegisterResponse,
-    RegistryStats as ProtoRegistryStats, RemoveNodeRequest, discovery_server::Discovery,
+    HeartbeatRequest, RegisterResponse, RemoveNodeRequest, discovery_server::Discovery,
 };
+use proto::types::{NodeDescriptor as ProtoNodeDescriptor, RegistryStats as ProtoRegistryStats};
 use std::sync::atomic::Ordering;
 use tonic::{Request, Response, Status};
 

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use common::NodeDescriptor;
-use proto::discovery::{GetRandomPathRequest, discovery_client::DiscoveryClient};
+use proto::services::{GetRandomPathRequest, discovery_client::DiscoveryClient};
 use std::time::{Duration, Instant};
 use tonic::transport::Channel;
 use tracing::{debug, info};

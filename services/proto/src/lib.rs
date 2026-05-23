@@ -1,7 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-pub mod discovery {
-    tonic::include_proto!("discovery");
+pub mod types {
+    tonic::include_proto!("discovery.types");
+}
+
+pub mod services {
+    tonic::include_proto!("discovery.services");
 
     pub const FILE_DESCRIPTOR_SET: &[u8] =
         tonic::include_file_descriptor_set!("discovery_descriptor");
@@ -9,25 +13,25 @@ pub mod discovery {
 
 // ── NodeType ────────────────────────────────────────────────────────────────
 
-impl From<common::NodeType> for discovery::NodeType {
+impl From<common::NodeType> for types::NodeType {
     fn from(t: common::NodeType) -> Self {
         match t {
-            common::NodeType::Entry => discovery::NodeType::Entry,
-            common::NodeType::Middle => discovery::NodeType::Middle,
-            common::NodeType::Exit => discovery::NodeType::Exit,
+            common::NodeType::Entry => types::NodeType::Entry,
+            common::NodeType::Middle => types::NodeType::Middle,
+            common::NodeType::Exit => types::NodeType::Exit,
         }
     }
 }
 
-impl TryFrom<discovery::NodeType> for common::NodeType {
+impl TryFrom<types::NodeType> for common::NodeType {
     type Error = tonic::Status;
 
-    fn try_from(t: discovery::NodeType) -> Result<Self, Self::Error> {
+    fn try_from(t: types::NodeType) -> Result<Self, Self::Error> {
         match t {
-            discovery::NodeType::Entry => Ok(common::NodeType::Entry),
-            discovery::NodeType::Middle => Ok(common::NodeType::Middle),
-            discovery::NodeType::Exit => Ok(common::NodeType::Exit),
-            discovery::NodeType::Unspecified => {
+            types::NodeType::Entry => Ok(common::NodeType::Entry),
+            types::NodeType::Middle => Ok(common::NodeType::Middle),
+            types::NodeType::Exit => Ok(common::NodeType::Exit),
+            types::NodeType::Unspecified => {
                 Err(tonic::Status::invalid_argument("NodeType unspecified"))
             }
         }
@@ -36,18 +40,18 @@ impl TryFrom<discovery::NodeType> for common::NodeType {
 
 // ── PublicKey ───────────────────────────────────────────────────────────────
 
-impl From<common::PublicKey> for discovery::PublicKey {
+impl From<common::PublicKey> for types::PublicKey {
     fn from(pk: common::PublicKey) -> Self {
-        discovery::PublicKey {
+        types::PublicKey {
             bytes: pk.bytes.to_vec(),
         }
     }
 }
 
-impl TryFrom<&discovery::PublicKey> for common::PublicKey {
+impl TryFrom<&types::PublicKey> for common::PublicKey {
     type Error = tonic::Status;
 
-    fn try_from(pk: &discovery::PublicKey) -> Result<Self, Self::Error> {
+    fn try_from(pk: &types::PublicKey) -> Result<Self, Self::Error> {
         let bytes: [u8; 32] = pk
             .bytes
             .get(..)
@@ -59,9 +63,9 @@ impl TryFrom<&discovery::PublicKey> for common::PublicKey {
 
 // ── ExitPolicy ──────────────────────────────────────────────────────────────
 
-impl From<common::ExitPolicy> for discovery::ExitPolicy {
+impl From<common::ExitPolicy> for types::ExitPolicy {
     fn from(policy: common::ExitPolicy) -> Self {
-        discovery::ExitPolicy {
+        types::ExitPolicy {
             allowed_ports: policy.allowed_ports.iter().map(|&p| p as u32).collect(),
             blocked_ports: policy.blocked_ports.iter().map(|&p| p as u32).collect(),
             allowed_ips: policy.allowed_ips.iter().map(ip_to_bytes).collect(),
@@ -70,10 +74,10 @@ impl From<common::ExitPolicy> for discovery::ExitPolicy {
     }
 }
 
-impl TryFrom<&discovery::ExitPolicy> for common::ExitPolicy {
+impl TryFrom<&types::ExitPolicy> for common::ExitPolicy {
     type Error = tonic::Status;
 
-    fn try_from(policy: &discovery::ExitPolicy) -> Result<Self, Self::Error> {
+    fn try_from(policy: &types::ExitPolicy) -> Result<Self, Self::Error> {
         let allowed_ips = policy
             .allowed_ips
             .iter()
@@ -124,26 +128,26 @@ fn ip_from_bytes(bytes: &[u8]) -> Result<IpAddr, tonic::Status> {
 
 // ── NodeDescriptor ──────────────────────────────────────────────────────────
 
-impl From<common::NodeDescriptor> for discovery::NodeDescriptor {
+impl From<common::NodeDescriptor> for types::NodeDescriptor {
     fn from(d: common::NodeDescriptor) -> Self {
-        discovery::NodeDescriptor {
+        types::NodeDescriptor {
             node_id: d.node_id,
-            node_type: discovery::NodeType::from(d.node_type) as i32,
+            node_type: types::NodeType::from(d.node_type) as i32,
             address: d.address.to_string(),
-            public_key: Some(discovery::PublicKey::from(d.public_key)),
+            public_key: Some(types::PublicKey::from(d.public_key)),
             bandwidth: d.bandwidth,
-            exit_policy: d.exit_policy.map(discovery::ExitPolicy::from),
+            exit_policy: d.exit_policy.map(types::ExitPolicy::from),
             operator_id: d.operator_id,
             tls_cert_fingerprint: d.tls_cert_fingerprint,
         }
     }
 }
 
-impl TryFrom<&discovery::NodeDescriptor> for common::NodeDescriptor {
+impl TryFrom<&types::NodeDescriptor> for common::NodeDescriptor {
     type Error = tonic::Status;
 
-    fn try_from(d: &discovery::NodeDescriptor) -> Result<Self, Self::Error> {
-        let node_type = discovery::NodeType::try_from(d.node_type)
+    fn try_from(d: &types::NodeDescriptor) -> Result<Self, Self::Error> {
+        let node_type = types::NodeType::try_from(d.node_type)
             .map_err(|e| tonic::Status::invalid_argument(format!("Invalid node type: {}", e)))?;
         let node_type = common::NodeType::try_from(node_type)?;
         let address: SocketAddr = d
@@ -175,9 +179,9 @@ impl TryFrom<&discovery::NodeDescriptor> for common::NodeDescriptor {
 
 // ── NodeMetrics ─────────────────────────────────────────────────────────────
 
-impl From<common::NodeMetrics> for discovery::NodeMetrics {
+impl From<common::NodeMetrics> for types::NodeMetrics {
     fn from(m: common::NodeMetrics) -> Self {
-        discovery::NodeMetrics {
+        types::NodeMetrics {
             connections_accepted: m.connections_accepted,
             circuits_active: m.circuits_active,
             circuits_created: m.circuits_created,
@@ -190,8 +194,8 @@ impl From<common::NodeMetrics> for discovery::NodeMetrics {
     }
 }
 
-impl From<&discovery::NodeMetrics> for common::NodeMetrics {
-    fn from(m: &discovery::NodeMetrics) -> Self {
+impl From<&types::NodeMetrics> for common::NodeMetrics {
+    fn from(m: &types::NodeMetrics) -> Self {
         common::NodeMetrics {
             connections_accepted: m.connections_accepted,
             circuits_active: m.circuits_active,
@@ -218,8 +222,8 @@ pub struct RegistryStatsConverted {
     pub newest_node_age_secs: Option<u64>,
 }
 
-impl From<discovery::RegistryStats> for RegistryStatsConverted {
-    fn from(s: discovery::RegistryStats) -> Self {
+impl From<types::RegistryStats> for RegistryStatsConverted {
+    fn from(s: types::RegistryStats) -> Self {
         RegistryStatsConverted {
             total_nodes: s.total_nodes as usize,
             entry_count: s.entry_count as usize,

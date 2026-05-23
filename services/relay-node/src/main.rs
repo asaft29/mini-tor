@@ -16,10 +16,8 @@ use common::{
 use config::RelayConfig;
 use keypair::KeyPair;
 use metrics::{EventKind, RelayMetrics};
-use proto::discovery::{
-    HeartbeatRequest, NodeDescriptor as ProtoNodeDescriptor, RemoveNodeRequest,
-    discovery_client::DiscoveryClient,
-};
+use proto::services::{HeartbeatRequest, RemoveNodeRequest, discovery_client::DiscoveryClient};
+use proto::types::NodeDescriptor as ProtoNodeDescriptor;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpListener,

@@ -7,7 +7,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tonic_build::configure()
         .file_descriptor_set_path(&descriptor_path)
-        .compile_protos(&["definitions/discovery.proto"], &["definitions/"])?;
+        .compile_protos(
+            &["definitions/types.proto", "definitions/discovery.proto"],
+            &["definitions/"],
+        )?;
 
     Ok(())
 }
