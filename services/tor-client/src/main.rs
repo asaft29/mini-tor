@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
 
     let metrics = ClientMetrics::new();
 
-    let directory_client = DirectoryClient::new(config.directory_url.clone()).await?;
+    let directory_client = Arc::new(DirectoryClient::new(config.directory_url.clone()).await?);
     let mut pool = CircuitPool::new(
         directory_client,
         config.pool_size,

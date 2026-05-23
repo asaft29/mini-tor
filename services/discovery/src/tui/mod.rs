@@ -1,7 +1,7 @@
 //! Discovery service TUI dashboard.
 
 use crate::core::metrics::{DiscoveryMetrics, EventKind};
-use crate::core::registry::NodeRegistry;
+use crate::core::store::NodeStore;
 use anyhow::{Context, Result};
 use common::metrics::{format_bytes, format_duration, format_timestamp};
 use crossterm::ExecutableCommand;
@@ -14,14 +14,13 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 const TICK_RATE: Duration = Duration::from_millis(200);
 
 /// Run the TUI dashboard until the user quits (q / Ctrl+C).
 pub async fn run_tui(
     metrics: Arc<DiscoveryMetrics>,
-    registry: Arc<RwLock<NodeRegistry>>,
+    registry: Arc<dyn NodeStore>,
     bind_addr: String,
 ) -> Result<bool> {
     enable_raw_mode().context("Failed to enable raw mode")?;
@@ -43,15 +42,14 @@ pub async fn run_tui(
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     metrics: &Arc<DiscoveryMetrics>,
-    registry: &Arc<RwLock<NodeRegistry>>,
+    registry: &Arc<dyn NodeStore>,
     bind_addr: &str,
 ) -> Result<bool> {
     loop {
         let (node_rows, ready, stats) = {
-            let reg = registry.read().await;
-            let nodes = reg.get_all_nodes();
-            let ready = reg.is_ready();
-            let stats = reg.get_stats();
+            let nodes = registry.get_all_nodes().await;
+            let ready = registry.is_ready().await;
+            let stats = registry.get_stats().await;
 
             let now = Instant::now();
             let rows: Vec<NodeRow> = nodes

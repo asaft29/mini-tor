@@ -1,5 +1,6 @@
 use crate::api::error::RegistryError;
 use crate::core::metrics::DiscoveryMetrics;
+use crate::core::store::NodeStore;
 use common::{NodeDescriptor, NodeMetrics, NodeType};
 use rand::Rng;
 use serde::Serialize;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 /// Shared application state for Axum handlers.
 #[derive(Clone)]
 pub struct AppState {
-    pub registry: Arc<tokio::sync::RwLock<NodeRegistry>>,
+    pub registry: Arc<dyn NodeStore>,
     pub metrics: Option<Arc<DiscoveryMetrics>>,
 }
 

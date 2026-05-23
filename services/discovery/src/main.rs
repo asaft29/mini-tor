@@ -4,6 +4,7 @@ use discovery::api::rest;
 use discovery::core::config::DiscoveryConfig;
 use discovery::core::metrics::{DiscoveryMetrics, EventKind};
 use discovery::core::registry::{AppState, NodeRegistry};
+use discovery::core::store::{NodeRegistryStore, NodeStore};
 use proto::services::discovery_server::DiscoveryServer;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
@@ -32,15 +33,16 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting Tor Discovery Service...");
 
-    let registry = Arc::new(RwLock::new(NodeRegistry::new(config.allow_same_ip)));
+    let raw_registry = Arc::new(RwLock::new(NodeRegistry::new(config.allow_same_ip)));
+    let store = Arc::new(NodeRegistryStore::new(raw_registry.clone()));
     let metrics = Some(DiscoveryMetrics::new());
 
     let state = AppState {
-        registry: registry.clone(),
+        registry: store.clone(),
         metrics: metrics.clone(),
     };
 
-    spawn_background_tasks(registry.clone(), config.stale_timeout_secs, metrics.clone());
+    spawn_background_tasks(store.clone(), config.stale_timeout_secs, metrics.clone());
 
     let bind_addr = config.bind_addr();
     let web_bind_addr = config.web_bind_addr();
@@ -88,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
         let tui_metrics = metrics
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Metrics must be present when TUI is enabled"))?;
-        let tui_registry = registry.clone();
+        let tui_registry = store.clone();
         let tui_addr = bind_addr.clone();
 
         let grpc_handle = tokio::spawn(grpc_server);
@@ -150,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Spawn background tasks for periodic maintenance
 fn spawn_background_tasks(
-    registry: Arc<RwLock<NodeRegistry>>,
+    registry: Arc<dyn NodeStore>,
     stale_timeout_secs: u64,
     metrics: Option<Arc<DiscoveryMetrics>>,
 ) {
@@ -159,8 +161,9 @@ fn spawn_background_tasks(
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let mut registry = registry_cleanup.write().await;
-            let removed = registry.cleanup_stale_nodes(Duration::from_secs(stale_timeout_secs));
+            let removed = registry_cleanup
+                .cleanup_stale_nodes(Duration::from_secs(stale_timeout_secs))
+                .await;
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale nodes", removed);
                 if let Some(m) = &metrics {

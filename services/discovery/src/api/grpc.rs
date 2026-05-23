@@ -27,8 +27,7 @@ impl Discovery for DiscoveryServiceImpl {
         &self,
         _request: Request<()>,
     ) -> Result<Response<HealthCheckResponse>, Status> {
-        let registry = self.state.registry.read().await;
-        let ready = registry.is_ready();
+        let ready = self.state.registry.is_ready().await;
 
         if let Some(m) = &self.state.metrics {
             m.push_event(EventKind::HealthCheck { ready });
@@ -47,9 +46,7 @@ impl Discovery for DiscoveryServiceImpl {
     }
 
     async fn readiness_check(&self, _request: Request<()>) -> Result<Response<()>, Status> {
-        let registry = self.state.registry.read().await;
-
-        if registry.is_ready() {
+        if self.state.registry.is_ready().await {
             Ok(Response::new(()))
         } else {
             Err(Status::unavailable(
@@ -78,8 +75,7 @@ impl Discovery for DiscoveryServiceImpl {
         let node_type = descriptor.node_type.to_string();
         let address = descriptor.address.to_string();
 
-        let mut registry = self.state.registry.write().await;
-        registry.register_node(descriptor);
+        self.state.registry.register_node(descriptor).await;
 
         if let Some(m) = &self.state.metrics {
             m.registrations.fetch_add(1, Ordering::Relaxed);
@@ -102,11 +98,14 @@ impl Discovery for DiscoveryServiceImpl {
         let req = request.into_inner();
         let node_id = req.node_id;
 
-        let mut registry = self.state.registry.write().await;
-        registry.remove_node(&node_id).map_err(|e| match e {
-            RegistryError::NodeNotFound(_) => Status::not_found(e.to_string()),
-            other => Status::internal(other.to_string()),
-        })?;
+        self.state
+            .registry
+            .remove_node(&node_id)
+            .await
+            .map_err(|e| match e {
+                RegistryError::NodeNotFound(_) => Status::not_found(e.to_string()),
+                other => Status::internal(other.to_string()),
+            })?;
 
         if let Some(m) = &self.state.metrics {
             m.removals.fetch_add(1, Ordering::Relaxed);
@@ -131,9 +130,10 @@ impl Discovery for DiscoveryServiceImpl {
             .ok_or_else(|| Status::invalid_argument("Metrics are required"))?;
         let metrics: common::NodeMetrics = (&metrics).into();
 
-        let mut registry = self.state.registry.write().await;
-        registry
+        self.state
+            .registry
             .update_heartbeat_with_metrics(&node_id, metrics)
+            .await
             .map_err(|e| match e {
                 RegistryError::NodeNotFound(_) => Status::not_found(e.to_string()),
                 other => Status::internal(other.to_string()),
@@ -155,8 +155,7 @@ impl Discovery for DiscoveryServiceImpl {
         &self,
         _request: Request<()>,
     ) -> Result<Response<GetAllNodesResponse>, Status> {
-        let registry = self.state.registry.read().await;
-        let nodes = registry.get_all_nodes();
+        let nodes = self.state.registry.get_all_nodes().await;
         let count = nodes.len() as u64;
         let nodes: Vec<ProtoNodeDescriptor> =
             nodes.into_iter().map(ProtoNodeDescriptor::from).collect();
@@ -171,11 +170,15 @@ impl Discovery for DiscoveryServiceImpl {
         let req = request.into_inner();
         let count = (req.count as usize).max(3);
 
-        let registry = self.state.registry.read().await;
-        let path = registry.get_random_path(count).map_err(|e| match e {
-            RegistryError::InsufficientNodes(_) => Status::unavailable(e.to_string()),
-            other => Status::internal(other.to_string()),
-        })?;
+        let path = self
+            .state
+            .registry
+            .get_random_path(count)
+            .await
+            .map_err(|e| match e {
+                RegistryError::InsufficientNodes(_) => Status::unavailable(e.to_string()),
+                other => Status::internal(other.to_string()),
+            })?;
 
         if let Some(m) = &self.state.metrics {
             m.path_requests.fetch_add(1, Ordering::Relaxed);
@@ -192,8 +195,7 @@ impl Discovery for DiscoveryServiceImpl {
         &self,
         _request: Request<()>,
     ) -> Result<Response<ProtoRegistryStats>, Status> {
-        let registry = self.state.registry.read().await;
-        let stats = registry.get_stats();
+        let stats = self.state.registry.get_stats().await;
 
         if let Some(m) = &self.state.metrics {
             m.push_event(EventKind::StatsQueried);

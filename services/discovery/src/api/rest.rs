@@ -97,18 +97,16 @@ fn event_to_entry(e: &TuiEvent<EventKind>) -> EventEntry {
 
 /// Single endpoint for the web dashboard UI (polled every 3 s).
 pub async fn dashboard_handler(State(state): State<AppState>) -> Json<DashboardResponse> {
-    let registry = state.registry.read().await;
-    let nodes: Vec<NodeWithMetrics> = registry
-        .get_all_entries()
+    let entries = state.registry.get_all_entries().await;
+    let nodes: Vec<NodeWithMetrics> = entries
         .into_iter()
         .map(|e| NodeWithMetrics {
-            descriptor: e.descriptor.clone(),
-            metrics: e.metrics.clone(),
+            descriptor: e.descriptor,
+            metrics: e.metrics,
         })
         .collect();
-    let stats = registry.get_stats();
-    let ready = registry.is_ready();
-    drop(registry);
+    let stats = state.registry.get_stats().await;
+    let ready = state.registry.is_ready().await;
 
     let (metrics, events) = match &state.metrics {
         Some(m) => {

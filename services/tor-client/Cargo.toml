@@ -11,6 +11,7 @@ proto = { path = "../proto" }
 rand = "0.9.2"
 tonic = "0.12"
 prost = "0.13"
+async-trait = "0.1"
 simple_socks5 = "0.1.2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1.44"

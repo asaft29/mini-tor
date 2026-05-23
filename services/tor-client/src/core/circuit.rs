@@ -1,4 +1,4 @@
-use crate::client::DirectoryClient;
+use crate::client::traits::NodeDirectory;
 use crate::core::crypto_engine::OnionKeys;
 use crate::core::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
@@ -349,7 +349,7 @@ impl CircuitBuilder {
 pub struct CircuitPool {
     circuits: HashMap<CircuitId, Arc<Mutex<Circuit>>>,
     next_circuit_id: CircuitId,
-    directory_client: DirectoryClient,
+    directory_client: Arc<dyn NodeDirectory>,
     pool_size: usize,
     hop_count: usize,
     metrics: Option<Arc<ClientMetrics>>,
@@ -362,7 +362,7 @@ pub struct CircuitPool {
 
 impl CircuitPool {
     pub fn new(
-        directory_client: DirectoryClient,
+        directory_client: Arc<dyn NodeDirectory>,
         pool_size: usize,
         hop_count: usize,
         max_rebuild_attempts: usize,
@@ -802,15 +802,15 @@ fn random_padding_interval() -> Duration {
 mod tests {
     use super::*;
 
-    fn make_test_client() -> DirectoryClient {
-        DirectoryClient::from_channel(
-            tonic::transport::Channel::from_static("http://localhost:8080").connect_lazy(),
-        )
+    use crate::client::mock::MockDirectory;
+
+    fn make_test_directory() -> Arc<dyn NodeDirectory> {
+        Arc::new(MockDirectory::new(vec![]))
     }
 
     #[tokio::test]
     async fn test_circuit_id_allocation_monotonic() {
-        let directory_client = make_test_client();
+        let directory_client = make_test_directory();
         let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
 
         let id1 = pool.allocate_circuit_id();
@@ -831,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_size_configuration() {
-        let directory_client = make_test_client();
+        let directory_client = make_test_directory();
         let pool = CircuitPool::new(directory_client, 5, 3, 3);
         assert_eq!(pool.pool_size, 5);
         assert_eq!(pool.circuit_count(), 0);
@@ -862,7 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rebuild_failure_increments_counter() {
-        let directory_client = make_test_client();
+        let directory_client = make_test_directory();
         let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
 
         // Simulate a failure by manually incrementing the counter (no real TCP).
@@ -882,7 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rebuild_failure_abandoned_after_max() {
-        let directory_client = make_test_client();
+        let directory_client = make_test_directory();
         let mut pool = CircuitPool::new(directory_client, 3, 3, 2);
 
         let failed_id: CircuitId = 7;
@@ -901,7 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rebuild_success_resets_counter() {
-        let directory_client = make_test_client();
+        let directory_client = make_test_directory();
         let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
 
         let failed_id: CircuitId = 5;

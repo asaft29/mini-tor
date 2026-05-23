@@ -7,6 +7,7 @@
 use common::{NodeDescriptor, NodeMetrics, NodeType, PublicKey};
 use discovery::api::grpc::DiscoveryServiceImpl;
 use discovery::core::registry::{AppState, NodeRegistry};
+use discovery::core::store::NodeRegistryStore;
 use proto::services::{
     GetAllNodesResponse, GetRandomPathRequest, HeartbeatRequest, RemoveNodeRequest,
     discovery_client::DiscoveryClient, discovery_server::DiscoveryServer,
@@ -17,8 +18,9 @@ use tonic::transport::{Channel, Server};
 
 /// Build a fresh `AppState` (empty registry, no persistence).
 fn fresh_state() -> AppState {
+    let raw = Arc::new(RwLock::new(NodeRegistry::new(false)));
     AppState {
-        registry: Arc::new(RwLock::new(NodeRegistry::new(false))),
+        registry: Arc::new(NodeRegistryStore::new(raw)),
         metrics: None,
     }
 }

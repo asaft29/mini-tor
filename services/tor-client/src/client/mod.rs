@@ -1,9 +1,15 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use common::NodeDescriptor;
 use proto::services::{GetRandomPathRequest, discovery_client::DiscoveryClient};
 use std::time::{Duration, Instant};
 use tonic::transport::Channel;
 use tracing::{debug, info};
+
+pub mod mock;
+pub mod traits;
+
+use traits::NodeDirectory;
 
 /// gRPC client for the discovery service.
 pub struct DirectoryClient {
@@ -16,31 +22,9 @@ pub struct DirectoryClient {
     cache_ttl: Duration,
 }
 
-impl DirectoryClient {
-    pub async fn new(directory_url: String) -> Result<Self> {
-        let channel = Channel::from_shared(directory_url)?
-            .connect()
-            .await
-            .context("Failed to connect to discovery gRPC service")?;
-        Ok(Self {
-            grpc_client: DiscoveryClient::new(channel),
-            cached_nodes: Vec::new(),
-            cache_expiry: None,
-            cache_ttl: Duration::from_secs(300),
-        })
-    }
-
-    pub fn from_channel(channel: Channel) -> Self {
-        Self {
-            grpc_client: DiscoveryClient::new(channel),
-            cached_nodes: Vec::new(),
-            cache_expiry: None,
-            cache_ttl: Duration::from_secs(300),
-        }
-    }
-
-    /// Fetch a random N-hop path from the directory (1 entry + (hop_count-2) middles + 1 exit).
-    pub async fn get_random_path(&self, hop_count: usize) -> Result<Vec<NodeDescriptor>> {
+#[async_trait]
+impl NodeDirectory for DirectoryClient {
+    async fn get_random_path(&self, hop_count: usize) -> Result<Vec<NodeDescriptor>> {
         debug!("Fetching {}-hop random path via gRPC", hop_count);
 
         let request = tonic::Request::new(GetRandomPathRequest {
@@ -81,6 +65,30 @@ impl DirectoryClient {
         );
 
         Ok(nodes)
+    }
+}
+
+impl DirectoryClient {
+    pub async fn new(directory_url: String) -> Result<Self> {
+        let channel = Channel::from_shared(directory_url)?
+            .connect()
+            .await
+            .context("Failed to connect to discovery gRPC service")?;
+        Ok(Self {
+            grpc_client: DiscoveryClient::new(channel),
+            cached_nodes: Vec::new(),
+            cache_expiry: None,
+            cache_ttl: Duration::from_secs(300),
+        })
+    }
+
+    pub fn from_channel(channel: Channel) -> Self {
+        Self {
+            grpc_client: DiscoveryClient::new(channel),
+            cached_nodes: Vec::new(),
+            cache_expiry: None,
+            cache_ttl: Duration::from_secs(300),
+        }
     }
 
     /// Fetch all registered nodes (cached for 5 minutes).
