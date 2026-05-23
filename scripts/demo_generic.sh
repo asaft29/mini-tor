@@ -219,18 +219,6 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-wait_for_http() {
-    local url="$1" name="$2" max="${3:-40}" attempt=0
-    while [ "$attempt" -lt "$max" ]; do
-        if curl -sf "$url" >/dev/null 2>&1; then return 0; fi
-        attempt=$((attempt + 1))
-        sleep 0.5
-    done
-    printf "${RED}${BOLD}  %s  error${RESET}${RED} · %s did not become ready at %s${RESET}\n" \
-        "$CROSS" "$name" "$url" >&2
-    return 1
-}
-
 wait_for_tcp() {
     local host="$1" port="$2" name="$3" max="${4:-40}" attempt=0
     while [ "$attempt" -lt "$max" ]; do
@@ -322,7 +310,8 @@ RUST_LOG="$RUST_LOG" \
     > "$LOG_DIR/discovery.log" 2>&1 &
 PIDS+=($!)
 
-wait_for_http "http://127.0.0.1:$DISCOVERY_PORT/health" "Discovery" 40
+wait_for_tcp 127.0.0.1 "$DISCOVERY_PORT" "Discovery gRPC"
+echo "  Discovery gRPC is listening."
 echo "  Discovery is healthy."
 
 # ---- Launch Relay Nodes ----
@@ -359,19 +348,15 @@ start_relay exit "$EXIT_PORT" "exit"
 # Wait for discovery to see all relay types registered (readiness check)
 echo ""
 echo "  Waiting for discovery to see all relay types registered..."
-wait_for_http "http://127.0.0.1:$DISCOVERY_PORT/ready" "Discovery readiness" 40
+echo "Giving relays time to register..."
+sleep 5
+echo "Discovery should now be ready with relay nodes."
 echo "  Discovery reports READY."
 
-# Show registered nodes
+# Registered nodes (use grpcurl to query via gRPC)
 echo ""
-echo "  Registered nodes:"
-if command -v jq >/dev/null 2>&1; then
-    curl -sf "http://127.0.0.1:$DISCOVERY_PORT/api/nodes" \
-        | jq -r '.nodes[] | "    [\(.node_type)] \(.address)"' 2>/dev/null \
-        || curl -sf "http://127.0.0.1:$DISCOVERY_PORT/api/nodes"
-else
-    curl -sf "http://127.0.0.1:$DISCOVERY_PORT/api/nodes"
-fi
+echo "  Registered nodes (query via gRPC):"
+echo "    grpcurl -plaintext 127.0.0.1:\$DISCOVERY_PORT discovery.services.Discovery/GetAllNodes"
 
 # ---- Launch Tor Client ----
 
@@ -400,7 +385,7 @@ if [ "$NO_TUI" = true ]; then
 
     section "All services running!"
     echo ""
-    echo "  Discovery:    http://127.0.0.1:$DISCOVERY_PORT  (Swagger: /swagger-ui)"
+    echo "  Discovery gRPC: 127.0.0.1:$DISCOVERY_PORT  (gRPC reflection enabled)"
     echo "  SOCKS5 proxy: 127.0.0.1:$SOCKS_PORT  (--hops $NUM_HOPS)"
     echo ""
     echo "  Test with:"

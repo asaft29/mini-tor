@@ -11,7 +11,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "2.0"
-utoipa = "5"
 aes = "0.8"
 ctr = "0.9"
 sha2 = "0.10"

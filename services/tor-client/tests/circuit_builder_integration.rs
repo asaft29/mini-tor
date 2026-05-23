@@ -23,7 +23,7 @@ use common::{
 use rand_core::OsRng;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tor_client::circuit::CircuitBuilder;
+use tor_client::core::circuit::CircuitBuilder;
 use tor_llcrypto::pk::curve25519::{PublicKey as X25519PublicKey, StaticSecret};
 
 /// A relay's static identity keypair (persists for the relay's lifetime).
@@ -341,7 +341,7 @@ async fn test_full_telescopic_handshake() {
     assert_eq!(built.circuit.circuit_id, 42);
     assert_eq!(
         built.circuit.state,
-        tor_client::circuit::CircuitState::Ready
+        tor_client::core::circuit::CircuitState::Ready
     );
 
     // Onion keys should be populated — 3 hops with non-zero session keys

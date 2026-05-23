@@ -5,8 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 use common::{NodeDescriptor, NodeMetrics, NodeType, PublicKey};
-use discovery::grpc::DiscoveryServiceImpl;
-use discovery::registry::{AppState, NodeRegistry};
+use discovery::api::grpc::DiscoveryServiceImpl;
+use discovery::core::registry::{AppState, NodeRegistry};
 use proto::services::{
     GetAllNodesResponse, GetRandomPathRequest, HeartbeatRequest, RemoveNodeRequest,
     discovery_client::DiscoveryClient, discovery_server::DiscoveryServer,

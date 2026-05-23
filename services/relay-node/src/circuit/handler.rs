@@ -1,7 +1,7 @@
 use crate::circuit::entry::EntryCircuitHandler;
 use crate::circuit::exit::ExitCircuitHandler;
 use crate::circuit::middle::MiddleCircuitHandler;
-use crate::metrics::RelayMetrics;
+use crate::core::metrics::RelayMetrics;
 use common::{
     RelayReadHalf, RelayStream, RelayWriteHalf,
     crypto::{CipherPair, SessionKey},

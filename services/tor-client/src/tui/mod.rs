@@ -1,7 +1,7 @@
 //! Tor client TUI dashboard.
 
-use crate::circuit::{CircuitPool, CircuitState};
-use crate::metrics::{ClientMetrics, EventKind};
+use crate::core::circuit::{CircuitPool, CircuitState};
+use crate::core::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
 use common::metrics::{Direction, format_bytes, format_duration, format_timestamp};
 use crossterm::ExecutableCommand;

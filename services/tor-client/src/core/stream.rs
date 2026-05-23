@@ -1,5 +1,5 @@
-use crate::circuit::Circuit;
-use crate::metrics::{ClientMetrics, EventKind};
+use crate::core::circuit::Circuit;
+use crate::core::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
 use common::MessageCommand;
 use common::metrics::Direction;

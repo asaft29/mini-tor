@@ -1,6 +1,6 @@
-use crate::crypto_engine::OnionKeys;
-use crate::directory_client::DirectoryClient;
-use crate::metrics::{ClientMetrics, EventKind};
+use crate::client::DirectoryClient;
+use crate::core::crypto_engine::OnionKeys;
+use crate::core::metrics::{ClientMetrics, EventKind};
 use anyhow::{Context, Result};
 use common::crypto::{CipherPair, NtorEphemeralKeyPair, SessionKey, ntor_client_finish_raw};
 use common::metrics::Direction;

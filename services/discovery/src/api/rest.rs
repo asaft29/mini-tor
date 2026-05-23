@@ -1,14 +1,17 @@
 use axum::{
-    Json,
+    Json, Router,
     extract::State,
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
+    routing::get,
 };
 use common::metrics::TuiEvent;
 use serde::Serialize;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
 
-use crate::metrics::EventKind;
-use crate::registry::AppState;
+use crate::core::metrics::EventKind;
+use crate::core::registry::AppState;
 
 /// Metrics snapshot for the web dashboard.
 #[derive(Debug, Serialize)]
@@ -46,7 +49,7 @@ pub struct NodeWithMetrics {
 #[derive(Debug, Serialize)]
 pub struct DashboardResponse {
     pub nodes: Vec<NodeWithMetrics>,
-    pub stats: crate::registry::RegistryStats,
+    pub stats: crate::core::registry::RegistryStats,
     pub metrics: MetricsSummary,
     pub ready: bool,
     pub events: Vec<EventEntry>,
@@ -163,7 +166,7 @@ pub async fn serve_asset(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
 
-    match crate::assets::Asset::get(path) {
+    match crate::core::assets::Asset::get(path) {
         Some(content) => {
             let mime = mime_for_path(path);
             (
@@ -175,4 +178,14 @@ pub async fn serve_asset(uri: Uri) -> Response {
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// Build the Axum router for the web UI (REST dashboard + static assets).
+pub fn build_web_router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/dashboard", get(dashboard_handler))
+        .with_state(state)
+        .fallback(serve_asset)
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
 }

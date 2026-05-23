@@ -1,9 +1,7 @@
 mod circuit;
-mod config;
-mod config_wizard;
-mod keypair;
-mod metrics;
+mod core;
 mod tui;
+mod wizard;
 
 use anyhow::{Context, Result};
 use circuit::{
@@ -13,9 +11,9 @@ use clap::Parser;
 use common::{
     NodeDescriptor, NodeMetrics, RelayStream, RelayTlsConfig, RelayWriteHalf, protocol::Message,
 };
-use config::RelayConfig;
-use keypair::KeyPair;
-use metrics::{EventKind, RelayMetrics};
+use core::config::RelayConfig;
+use core::keypair::KeyPair;
+use core::metrics::{EventKind, RelayMetrics};
 use proto::services::{HeartbeatRequest, RemoveNodeRequest, discovery_client::DiscoveryClient};
 use proto::types::NodeDescriptor as ProtoNodeDescriptor;
 use std::{net::SocketAddr, sync::Arc};
@@ -34,7 +32,7 @@ async fn main() -> Result<()> {
     let mut config = RelayConfig::parse();
 
     if config.tui && config.node_type.is_none() {
-        config = config_wizard::run_wizard(&config)?;
+        config = wizard::run_wizard(&config)?;
     }
 
     let node_type = config.node_type.ok_or_else(|| {

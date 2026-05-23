@@ -1,9 +1,9 @@
 use clap::Parser;
-use discovery::config::DiscoveryConfig;
-use discovery::grpc::DiscoveryServiceImpl;
-use discovery::metrics::{DiscoveryMetrics, EventKind};
-use discovery::registry::{AppState, NodeRegistry};
-use discovery::routes;
+use discovery::api::grpc::DiscoveryServiceImpl;
+use discovery::api::rest;
+use discovery::core::config::DiscoveryConfig;
+use discovery::core::metrics::{DiscoveryMetrics, EventKind};
+use discovery::core::registry::{AppState, NodeRegistry};
 use proto::services::discovery_server::DiscoveryServer;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         println!();
     }
 
-    let web_router = routes::build_web_router(state.clone());
+    let web_router = rest::build_web_router(state.clone());
 
     let grpc_server = tonic::transport::Server::builder()
         .accept_http1(true)

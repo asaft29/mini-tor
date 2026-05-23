@@ -1,5 +1,5 @@
-use crate::error::RegistryError;
-use crate::metrics::DiscoveryMetrics;
+use crate::api::error::RegistryError;
+use crate::core::metrics::DiscoveryMetrics;
 use common::{NodeDescriptor, NodeMetrics, NodeType};
 use rand::Rng;
 use serde::Serialize;

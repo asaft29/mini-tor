@@ -1,9 +1,3 @@
-pub mod assets;
-pub mod config;
-pub mod error;
-pub mod grpc;
-pub mod handlers;
-pub mod metrics;
-pub mod registry;
-pub mod routes;
+pub mod api;
+pub mod core;
 pub mod tui;

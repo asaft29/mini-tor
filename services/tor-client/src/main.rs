@@ -7,13 +7,13 @@ use simple_socks5::{ATYP, Socks5};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tor_client::circuit::{
+use tor_client::client::DirectoryClient;
+use tor_client::core::circuit::{
     CircuitPool, CircuitState, spawn_circuit_keepalive, spawn_circuit_monitor, spawn_circuit_reader,
 };
-use tor_client::config::{MAX_HOPS, TorClientConfig};
-use tor_client::directory_client::DirectoryClient;
-use tor_client::metrics::{ClientMetrics, EventKind};
-use tor_client::stream::handle_stream;
+use tor_client::core::config::{MAX_HOPS, TorClientConfig};
+use tor_client::core::metrics::{ClientMetrics, EventKind};
+use tor_client::core::stream::handle_stream;
 use tracing::{error, info, warn};
 
 #[tokio::main]
@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
     let mut config = TorClientConfig::parse();
 
     if config.tui {
-        config = tor_client::config_wizard::run_wizard(&config)?;
+        config = tor_client::wizard::run_wizard(&config)?;
     } else if config.hops == MAX_HOPS {
         eprintln!(
             "You requested a {MAX_HOPS}-hop circuit (the maximum).\n  \

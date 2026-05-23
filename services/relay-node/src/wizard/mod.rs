@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use std::io::stdout;
 use std::time::Duration;
 
-use crate::config::RelayConfig;
+use crate::core::config::RelayConfig;
 
 const NODE_TYPES: [NodeType; 3] = [NodeType::Entry, NodeType::Middle, NodeType::Exit];
 

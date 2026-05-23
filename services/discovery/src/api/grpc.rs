@@ -1,6 +1,6 @@
-use crate::error::RegistryError;
-use crate::metrics::EventKind;
-use crate::registry::AppState;
+use crate::api::error::RegistryError;
+use crate::core::metrics::EventKind;
+use crate::core::registry::AppState;
 use proto::services::{
     GetAllNodesResponse, GetRandomPathRequest, GetRandomPathResponse, HealthCheckResponse,
     HeartbeatRequest, RegisterResponse, RemoveNodeRequest, discovery_server::Discovery,

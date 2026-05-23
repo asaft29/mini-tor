@@ -18,7 +18,7 @@ pub type RelayReadHalf = ReadHalf<RelayStream>;
 pub type RelayWriteHalf = WriteHalf<RelayStream>;
 
 /// Node type in the Tor network.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeType {
     Entry,
     Middle,
@@ -49,7 +49,7 @@ impl std::str::FromStr for NodeType {
 }
 
 /// X25519 public key for a relay node (32 bytes).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PublicKey {
     pub bytes: [u8; 32],
 }
@@ -95,13 +95,11 @@ impl std::fmt::Display for PublicKey {
 }
 
 /// Exit policy for exit nodes.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExitPolicy {
     pub allowed_ports: Vec<u16>,
     pub blocked_ports: Vec<u16>,
-    #[schema(value_type = Vec<String>)]
     pub allowed_ips: Vec<IpAddr>,
-    #[schema(value_type = Vec<String>)]
     pub blocked_ips: Vec<IpAddr>,
 }
 
@@ -152,12 +150,11 @@ impl ExitPolicy {
 }
 
 /// Node descriptor containing all information about a relay node.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeDescriptor {
     pub node_id: String,
     pub node_type: NodeType,
 
-    #[schema(value_type = String, example = "127.0.0.1:9001")]
     pub address: SocketAddr,
     pub public_key: PublicKey,
 
@@ -177,7 +174,7 @@ pub struct NodeDescriptor {
 }
 
 /// Live metrics snapshot sent by a relay node during heartbeat.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeMetrics {
     pub connections_accepted: u64,
     pub circuits_active: u64,

@@ -1,7 +1,7 @@
 //! Discovery service TUI dashboard.
 
-use crate::metrics::{DiscoveryMetrics, EventKind};
-use crate::registry::NodeRegistry;
+use crate::core::metrics::{DiscoveryMetrics, EventKind};
+use crate::core::registry::NodeRegistry;
 use anyhow::{Context, Result};
 use common::metrics::{format_bytes, format_duration, format_timestamp};
 use crossterm::ExecutableCommand;
@@ -117,7 +117,7 @@ fn build_header(
     metrics: &DiscoveryMetrics,
     bind_addr: &str,
     ready: bool,
-    stats: &crate::registry::RegistryStats,
+    stats: &crate::core::registry::RegistryStats,
 ) -> String {
     let uptime = format_duration(metrics.uptime());
     let ready_str = if ready { "YES" } else { "NO" };

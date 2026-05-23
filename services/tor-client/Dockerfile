@@ -1,12 +1,11 @@
 # Build stage
 FROM rust:1.92-slim-bookworm AS builder
 
-# Install build dependencies (curl needed by utoipa-swagger-ui in discovery,
-# which is a workspace member and must compile even though we only ship tor-client)
+# Install build dependencies (protoc needed by tonic-build for proto crate compilation)
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
-    curl \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

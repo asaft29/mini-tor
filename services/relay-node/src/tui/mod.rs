@@ -2,7 +2,7 @@
 
 use crate::circuit::CircuitRegistry;
 use crate::circuit::handler::CircuitState;
-use crate::metrics::{EventKind, RelayMetrics};
+use crate::core::metrics::{EventKind, RelayMetrics};
 use anyhow::{Context, Result};
 use common::NodeType;
 use common::metrics::{Direction, format_bytes, format_duration, format_timestamp};

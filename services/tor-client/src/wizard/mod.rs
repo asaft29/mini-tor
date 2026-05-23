@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use std::io::stdout;
 use std::time::Duration;
 
-use crate::config::TorClientConfig;
+use crate::core::config::TorClientConfig;
 
 const MAX_HOPS: usize = 10;
 
@@ -330,7 +330,7 @@ fn render(frame: &mut Frame, state: &WizardState) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::config::TorClientConfig;
+    use crate::core::config::TorClientConfig;
     use clap::Parser;
 
     fn make_default_config() -> TorClientConfig {

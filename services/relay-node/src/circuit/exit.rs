@@ -1,6 +1,6 @@
 use crate::circuit::handler::{CircuitContext, CircuitState};
-use crate::keypair::KeyPair;
-use crate::metrics::{EventKind, RelayMetrics};
+use crate::core::keypair::KeyPair;
+use crate::core::metrics::{EventKind, RelayMetrics};
 use common::{
     RelayWriteHalf,
     crypto::{CipherPair, RunningDigest, SessionKey},
