@@ -1,5 +1,5 @@
 use common::PublicKey;
-use common::crypto::SessionKey;
+use common::crypto::{NtorHandshaker, SessionKey, TorNtorHandshaker};
 use rand::rngs::OsRng;
 use tor_llcrypto::pk::curve25519::{PublicKey as X25519PublicKey, StaticSecret};
 
@@ -51,7 +51,11 @@ impl KeyPair {
         &self,
         client_ephemeral_pub: &[u8; 32],
     ) -> ([u8; 32], [u8; 32], SessionKey) {
-        common::crypto::ntor_server(&self.secret_bytes, &self.public.bytes, client_ephemeral_pub)
+        TorNtorHandshaker.server_handshake(
+            &self.secret_bytes,
+            &self.public.bytes,
+            client_ephemeral_pub,
+        )
     }
 }
 
@@ -70,14 +74,15 @@ mod tests {
 
         let (server_eph_pub, auth, relay_key) = relay_kp.ntor_server_handshake(&client_pub);
 
-        let client_key = common::crypto::ntor_client_finish_raw(
-            client_kp.secret_bytes(),
-            &client_pub,
-            &relay_kp.public.bytes,
-            &server_eph_pub,
-            &auth,
-        )
-        .unwrap();
+        let client_key = TorNtorHandshaker
+            .client_handshake(
+                client_kp.secret_bytes(),
+                &client_pub,
+                &relay_kp.public.bytes,
+                &server_eph_pub,
+                &auth,
+            )
+            .unwrap();
 
         assert_eq!(relay_key, client_key);
     }

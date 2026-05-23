@@ -3,7 +3,7 @@ use crate::core::keypair::KeyPair;
 use crate::core::metrics::{EventKind, RelayMetrics};
 use common::{
     RelayWriteHalf,
-    crypto::{CipherPair, RunningDigest, SessionKey},
+    crypto::{RunningDigest, SessionKey, StatefulCipher},
     metrics::Direction,
     protocol::{CircuitId, MAX_PAYLOAD_SIZE, Message, MessageCommand, StreamId},
 };
@@ -24,7 +24,7 @@ struct ExitStream {
 
 /// Combined crypto state for the exit node: cipher pair + running digests.
 pub struct ExitCryptoState {
-    pub cipher: CipherPair,
+    pub cipher: Box<dyn StatefulCipher>,
     pub forward_digest: RunningDigest,
     pub backward_digest: RunningDigest,
 }

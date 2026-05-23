@@ -1,4 +1,5 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use rcgen::{CertificateParams, KeyPair, SanType};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -18,9 +19,24 @@ pub fn compute_cert_fingerprint(cert_der: &[u8]) -> String {
     hex::encode(hash)
 }
 
+/// Abstraction over TLS stream acceptance.
+/// Enables swapping TLS backends without changing the relay's accept loop.
+#[async_trait]
+pub trait StreamAcceptor: Send + Sync {
+    async fn accept(&self, tcp: tokio::net::TcpStream) -> Result<crate::RelayStream>;
+}
+
+#[async_trait]
+impl StreamAcceptor for TlsAcceptor {
+    async fn accept(&self, tcp: tokio::net::TcpStream) -> Result<crate::RelayStream> {
+        let tls_stream = self.accept(tcp).await?;
+        Ok(Box::new(tls_stream))
+    }
+}
+
 pub struct RelayTlsConfig {
     pub fingerprint: String,
-    pub acceptor: TlsAcceptor,
+    pub acceptor: Arc<dyn StreamAcceptor>,
 }
 
 impl RelayTlsConfig {
@@ -58,7 +74,7 @@ impl RelayTlsConfig {
 
         Ok(Self {
             fingerprint,
-            acceptor,
+            acceptor: Arc::new(acceptor),
         })
     }
 

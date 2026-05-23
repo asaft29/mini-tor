@@ -23,7 +23,6 @@ use tokio::{
     sync::Mutex,
     time::{Duration, interval},
 };
-use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -257,7 +256,7 @@ async fn accept_connections(
     keypair: KeyPair,
     node_type: common::NodeType,
     metrics: Arc<RelayMetrics>,
-    tls_acceptor: TlsAcceptor,
+    tls_acceptor: Arc<dyn common::tls::StreamAcceptor>,
 ) {
     loop {
         match listener.accept().await {
@@ -277,9 +276,7 @@ async fn accept_connections(
                 let tls_acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
                     match tls_acceptor.accept(tcp_stream).await {
-                        Ok(tls_stream) => {
-                            info!("TLS handshake completed for {}", addr);
-                            let stream: RelayStream = Box::new(tls_stream);
+                        Ok(stream) => {
                             handle_connection(stream, addr, registry, kp, node_type, m).await;
                         }
                         Err(e) => {
@@ -423,9 +420,11 @@ async fn handle_connection(
                                 if should_spawn_reader
                                     && let Some(handler) = registry.get_circuit_mut(circuit_id)
                                     && let Some(task_handle) = handler.spawn_nexthop_reader(
-                                        circuit_registry.clone(),
-                                        write_arc.clone(),
-                                        metrics.clone(),
+                                        crate::circuit::handler::CircuitIoContext {
+                                            circuit_registry: circuit_registry.clone(),
+                                            prev_hop_write: write_arc.clone(),
+                                            metrics: metrics.clone(),
+                                        },
                                     )
                                 {
                                     info!("Spawned background reader for circuit {}", circuit_id);
@@ -448,9 +447,11 @@ async fn handle_connection(
                                 if should_spawn_reader
                                     && let Some(handler) = registry.get_circuit_mut(circuit_id)
                                     && let Some(task_handle) = handler.spawn_nexthop_reader(
-                                        circuit_registry.clone(),
-                                        write_arc.clone(),
-                                        metrics.clone(),
+                                        crate::circuit::handler::CircuitIoContext {
+                                            circuit_registry: circuit_registry.clone(),
+                                            prev_hop_write: write_arc.clone(),
+                                            metrics: metrics.clone(),
+                                        },
                                     )
                                 {
                                     info!("Spawned background reader for circuit {}", circuit_id);

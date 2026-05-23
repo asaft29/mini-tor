@@ -21,9 +21,11 @@ use common::{
     server_name_from_addr,
 };
 use rand_core::OsRng;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tor_client::core::circuit::CircuitBuilder;
+use tor_client::core::transport::TcpTlsTransport;
 use tor_llcrypto::pk::curve25519::{PublicKey as X25519PublicKey, StaticSecret};
 
 /// A relay's static identity keypair (persists for the relay's lifetime).
@@ -67,11 +69,11 @@ fn relay_ntor(
 /// and return the TLS stream boxed as a RelayStream.
 async fn accept_tls(
     listener: &TcpListener,
-    tls_acceptor: &tokio_rustls::TlsAcceptor,
+    tls_acceptor: &Arc<dyn common::tls::StreamAcceptor>,
 ) -> (RelayStream, std::net::SocketAddr) {
     let (tcp_stream, addr) = listener.accept().await.unwrap();
-    let tls_stream = tls_acceptor.accept(tcp_stream).await.unwrap();
-    (Box::new(tls_stream) as RelayStream, addr)
+    let stream: RelayStream = tls_acceptor.accept(tcp_stream).await.unwrap();
+    (stream, addr)
 }
 
 /// Spawn a simulated entry node that handles:
@@ -84,7 +86,7 @@ async fn accept_tls(
 /// Uses stateful `CipherPair` matching real relay behavior.
 async fn spawn_entry_relay(
     identity: RelayIdentity,
-    tls_acceptor: tokio_rustls::TlsAcceptor,
+    tls_acceptor: Arc<dyn common::tls::StreamAcceptor>,
 ) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -186,7 +188,7 @@ async fn spawn_entry_relay(
 /// Uses stateful `CipherPair` matching real relay behavior.
 async fn spawn_middle_relay(
     identity: RelayIdentity,
-    tls_acceptor: tokio_rustls::TlsAcceptor,
+    tls_acceptor: Arc<dyn common::tls::StreamAcceptor>,
 ) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -258,7 +260,7 @@ async fn spawn_middle_relay(
 /// 1. CREATE -> CREATED (ntor handshake only)
 async fn spawn_exit_relay(
     identity: RelayIdentity,
-    tls_acceptor: tokio_rustls::TlsAcceptor,
+    tls_acceptor: Arc<dyn common::tls::StreamAcceptor>,
 ) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -335,7 +337,14 @@ async fn test_full_telescopic_handshake() {
         node_at("exit", NodeType::Exit, exit_addr, exit_pub, exit_fp),
     ];
 
-    let built = CircuitBuilder::build(42, &path).await.unwrap();
+    let built = CircuitBuilder::build(
+        42,
+        &path,
+        &TcpTlsTransport,
+        &common::crypto::TorNtorHandshaker,
+    )
+    .await
+    .unwrap();
 
     // Circuit should be Ready with the correct ID
     assert_eq!(built.circuit.circuit_id, 42);
@@ -362,7 +371,13 @@ async fn test_build_rejects_wrong_path_length() {
         String::new(),
     )];
 
-    let result = CircuitBuilder::build(1, &path).await;
+    let result = CircuitBuilder::build(
+        1,
+        &path,
+        &TcpTlsTransport,
+        &common::crypto::TorNtorHandshaker,
+    )
+    .await;
     match result {
         Err(e) => {
             let err = format!("{e}");
@@ -402,6 +417,12 @@ async fn test_build_fails_on_unreachable_entry() {
         ),
     ];
 
-    let result = CircuitBuilder::build(1, &path).await;
+    let result = CircuitBuilder::build(
+        1,
+        &path,
+        &TcpTlsTransport,
+        &common::crypto::TorNtorHandshaker,
+    )
+    .await;
     assert!(result.is_err());
 }

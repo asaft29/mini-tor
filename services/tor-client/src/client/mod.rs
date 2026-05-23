@@ -7,6 +7,7 @@ use tonic::transport::Channel;
 use tracing::{debug, info};
 
 pub mod mock;
+pub mod socks_proxy;
 pub mod traits;
 
 use traits::NodeDirectory;

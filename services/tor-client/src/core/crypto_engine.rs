@@ -1,18 +1,18 @@
-use common::crypto::{CipherPair, RunningDigest, SessionKey};
+use common::crypto::{RunningDigest, SessionKey, StatefulCipher};
 
 /// Keys for an N-hop onion circuit (N >= 3).
 pub struct OnionKeys {
     /// Session keys indexed [0=entry .. N-1=exit].
     pub session_keys: Vec<SessionKey>,
     /// Stateful cipher pairs indexed [0=entry .. N-1=exit].
-    pub ciphers: Vec<CipherPair>,
+    pub ciphers: Vec<Box<dyn StatefulCipher>>,
     pub forward_digest: RunningDigest,
     pub backward_digest: RunningDigest,
 }
 
 impl OnionKeys {
     /// Create from pre-built parallel vecs of session keys and cipher pairs.
-    pub fn new(session_keys: Vec<SessionKey>, ciphers: Vec<CipherPair>) -> Self {
+    pub fn new(session_keys: Vec<SessionKey>, ciphers: Vec<Box<dyn StatefulCipher>>) -> Self {
         Self {
             session_keys,
             ciphers,
@@ -53,7 +53,10 @@ mod tests {
     use common::crypto::CipherPair;
 
     fn make_test_keys(keys: &[SessionKey]) -> OnionKeys {
-        let ciphers = keys.iter().map(CipherPair::new).collect();
+        let ciphers: Vec<Box<dyn StatefulCipher>> = keys
+            .iter()
+            .map(|k| Box::new(CipherPair::new(k)) as Box<dyn StatefulCipher>)
+            .collect();
         OnionKeys::new(keys.to_vec(), ciphers)
     }
 

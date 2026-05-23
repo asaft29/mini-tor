@@ -1,18 +1,20 @@
 use crate::client::traits::NodeDirectory;
 use crate::core::crypto_engine::OnionKeys;
 use crate::core::metrics::{ClientMetrics, EventKind};
+use crate::core::transport::TransportLayer;
 use anyhow::{Context, Result};
-use common::crypto::{CipherPair, NtorEphemeralKeyPair, SessionKey, ntor_client_finish_raw};
+use common::crypto::{
+    CipherPair, NtorEphemeralKeyPair, NtorHandshaker, SessionKey, StatefulCipher,
+};
 use common::metrics::Direction;
 use common::{
     CELL_SIZE, CircuitId, Message, MessageCommand, NodeDescriptor, RelayReadHalf, RelayStream,
-    RelayTlsConfig, RelayWriteHalf, StreamId, server_name_from_addr,
+    RelayWriteHalf, StreamId,
 };
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
@@ -110,7 +112,12 @@ pub struct BuiltCircuit {
 pub struct CircuitBuilder;
 
 impl CircuitBuilder {
-    pub async fn build(circuit_id: CircuitId, path: &[NodeDescriptor]) -> Result<BuiltCircuit> {
+    pub async fn build(
+        circuit_id: CircuitId,
+        path: &[NodeDescriptor],
+        transport: &dyn TransportLayer,
+        handshaker: &dyn NtorHandshaker,
+    ) -> Result<BuiltCircuit> {
         if path.len() < 3 {
             return Err(anyhow::anyhow!(
                 "Circuit path must have at least 3 nodes, got {}",
@@ -132,41 +139,36 @@ impl CircuitBuilder {
                 .join(" -> ")
         );
 
-        let tcp_stream = TcpStream::connect(entry.address)
+        let mut entry_stream = transport
+            .connect(entry.address, &entry.tls_cert_fingerprint)
             .await
             .with_context(|| format!("Failed to connect to entry node at {}", entry.address))?;
-        info!("TCP connected to entry node at {}", entry.address);
-
-        let connector = RelayTlsConfig::make_tls_connector(&entry.tls_cert_fingerprint)
-            .context("Failed to create TLS connector")?;
-        let server_name = server_name_from_addr(entry.address);
-        let tls_stream = connector
-            .connect(server_name, tcp_stream)
-            .await
-            .with_context(|| {
-                format!("TLS handshake with entry node at {} failed", entry.address)
-            })?;
-        info!("TLS connected to entry node at {}", entry.address);
-
-        let mut entry_stream: RelayStream = Box::new(tls_stream);
+        info!("Connected to entry node at {}", entry.address);
 
         // CREATE handshake with entry (hop 0).
-        let entry_key = Self::handshake_create(circuit_id, &mut entry_stream, entry).await?;
+        let entry_key =
+            Self::handshake_create(circuit_id, &mut entry_stream, entry, handshaker).await?;
         info!("Completed CREATE handshake with entry node");
 
         let mut session_keys: Vec<SessionKey> = vec![entry_key.clone()];
-        let mut ciphers: Vec<CipherPair> = vec![CipherPair::new(&entry_key)];
+        let mut ciphers: Vec<Box<dyn StatefulCipher>> = vec![Box::new(CipherPair::new(&entry_key))];
 
         // EXTEND loop for hops 1..N-1.
         for hop_index in 1..path.len() {
             let node = path
                 .get(hop_index)
                 .ok_or_else(|| anyhow::anyhow!("Missing node at hop {}", hop_index))?;
-            let key =
-                Self::handshake_extend(circuit_id, &mut entry_stream, node, &mut ciphers).await?;
+            let key = Self::handshake_extend(
+                circuit_id,
+                &mut entry_stream,
+                node,
+                &mut ciphers,
+                handshaker,
+            )
+            .await?;
             info!("Completed EXTEND to hop {} ({})", hop_index, node.address);
             session_keys.push(key.clone());
-            ciphers.push(CipherPair::new(&key));
+            ciphers.push(Box::new(CipherPair::new(&key)));
         }
 
         let onion_keys = OnionKeys::new(session_keys, ciphers);
@@ -198,6 +200,7 @@ impl CircuitBuilder {
         circuit_id: CircuitId,
         stream: &mut RelayStream,
         entry: &NodeDescriptor,
+        handshaker: &dyn NtorHandshaker,
     ) -> Result<SessionKey> {
         let ephemeral = NtorEphemeralKeyPair::generate();
         let our_public = ephemeral.public.bytes;
@@ -244,14 +247,15 @@ impl CircuitBuilder {
                 .ok_or_else(|| anyhow::anyhow!("Invalid CREATED auth"))?,
         );
 
-        let session_key = ntor_client_finish_raw(
-            ephemeral.secret_bytes(),
-            &our_public,
-            &entry.public_key.bytes,
-            &server_eph_pub,
-            &auth,
-        )
-        .map_err(|e| anyhow::anyhow!("ntor handshake failed with entry: {}", e))?;
+        let session_key = handshaker
+            .client_handshake(
+                ephemeral.secret_bytes(),
+                &our_public,
+                &entry.public_key.bytes,
+                &server_eph_pub,
+                &auth,
+            )
+            .map_err(|e| anyhow::anyhow!("ntor handshake failed with entry: {}", e))?;
 
         debug!("ntor handshake complete with entry node");
         Ok(session_key)
@@ -264,7 +268,8 @@ impl CircuitBuilder {
         circuit_id: CircuitId,
         stream: &mut RelayStream,
         node: &NodeDescriptor,
-        ciphers: &mut [CipherPair],
+        ciphers: &mut [Box<dyn StatefulCipher>],
+        handshaker: &dyn NtorHandshaker,
     ) -> Result<SessionKey> {
         let ephemeral = NtorEphemeralKeyPair::generate();
         let our_public = ephemeral.public.bytes;
@@ -331,14 +336,15 @@ impl CircuitBuilder {
                 .ok_or_else(|| anyhow::anyhow!("Invalid EXTENDED auth"))?,
         );
 
-        let session_key = ntor_client_finish_raw(
-            ephemeral.secret_bytes(),
-            &our_public,
-            &node.public_key.bytes,
-            &server_eph_pub,
-            &auth,
-        )
-        .map_err(|e| anyhow::anyhow!("ntor handshake failed with {}: {}", node.address, e))?;
+        let session_key = handshaker
+            .client_handshake(
+                ephemeral.secret_bytes(),
+                &our_public,
+                &node.public_key.bytes,
+                &server_eph_pub,
+                &auth,
+            )
+            .map_err(|e| anyhow::anyhow!("ntor handshake failed with {}: {}", node.address, e))?;
 
         debug!("ntor handshake complete with {}", node.address);
         Ok(session_key)
@@ -350,6 +356,8 @@ pub struct CircuitPool {
     circuits: HashMap<CircuitId, Arc<Mutex<Circuit>>>,
     next_circuit_id: CircuitId,
     directory_client: Arc<dyn NodeDirectory>,
+    transport: Arc<dyn TransportLayer>,
+    handshaker: Arc<dyn NtorHandshaker>,
     pool_size: usize,
     hop_count: usize,
     metrics: Option<Arc<ClientMetrics>>,
@@ -363,6 +371,8 @@ pub struct CircuitPool {
 impl CircuitPool {
     pub fn new(
         directory_client: Arc<dyn NodeDirectory>,
+        transport: Arc<dyn TransportLayer>,
+        handshaker: Arc<dyn NtorHandshaker>,
         pool_size: usize,
         hop_count: usize,
         max_rebuild_attempts: usize,
@@ -371,6 +381,8 @@ impl CircuitPool {
             circuits: HashMap::new(),
             next_circuit_id: 1,
             directory_client,
+            transport,
+            handshaker,
             pool_size,
             hop_count,
             metrics: None,
@@ -540,7 +552,13 @@ impl CircuitPool {
                 )
             })?;
 
-        let built = CircuitBuilder::build(circuit_id, &path).await?;
+        let built = CircuitBuilder::build(
+            circuit_id,
+            &path,
+            self.transport.as_ref(),
+            self.handshaker.as_ref(),
+        )
+        .await?;
 
         let path_display = built.circuit.path_display.clone().unwrap_or_default();
 
@@ -803,15 +821,32 @@ mod tests {
     use super::*;
 
     use crate::client::mock::MockDirectory;
+    use crate::core::transport::TcpTlsTransport;
+    use common::crypto::TorNtorHandshaker;
 
     fn make_test_directory() -> Arc<dyn NodeDirectory> {
         Arc::new(MockDirectory::new(vec![]))
     }
 
+    fn make_test_transport() -> Arc<dyn TransportLayer> {
+        Arc::new(TcpTlsTransport)
+    }
+
+    fn make_test_handshaker() -> Arc<dyn NtorHandshaker> {
+        Arc::new(TorNtorHandshaker)
+    }
+
     #[tokio::test]
     async fn test_circuit_id_allocation_monotonic() {
         let directory_client = make_test_directory();
-        let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
+        let mut pool = CircuitPool::new(
+            directory_client,
+            make_test_transport(),
+            make_test_handshaker(),
+            3,
+            3,
+            3,
+        );
 
         let id1 = pool.allocate_circuit_id();
         let id2 = pool.allocate_circuit_id();
@@ -832,7 +867,14 @@ mod tests {
     #[tokio::test]
     async fn test_pool_size_configuration() {
         let directory_client = make_test_directory();
-        let pool = CircuitPool::new(directory_client, 5, 3, 3);
+        let pool = CircuitPool::new(
+            directory_client,
+            make_test_transport(),
+            make_test_handshaker(),
+            5,
+            3,
+            3,
+        );
         assert_eq!(pool.pool_size, 5);
         assert_eq!(pool.circuit_count(), 0);
     }
@@ -863,7 +905,14 @@ mod tests {
     #[tokio::test]
     async fn test_rebuild_failure_increments_counter() {
         let directory_client = make_test_directory();
-        let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
+        let mut pool = CircuitPool::new(
+            directory_client,
+            make_test_transport(),
+            make_test_handshaker(),
+            3,
+            3,
+            3,
+        );
 
         // Simulate a failure by manually incrementing the counter (no real TCP).
         let failed_id: CircuitId = 42;
@@ -883,7 +932,14 @@ mod tests {
     #[tokio::test]
     async fn test_rebuild_failure_abandoned_after_max() {
         let directory_client = make_test_directory();
-        let mut pool = CircuitPool::new(directory_client, 3, 3, 2);
+        let mut pool = CircuitPool::new(
+            directory_client,
+            make_test_transport(),
+            make_test_handshaker(),
+            3,
+            3,
+            2,
+        );
 
         let failed_id: CircuitId = 7;
 
@@ -902,7 +958,14 @@ mod tests {
     #[tokio::test]
     async fn test_rebuild_success_resets_counter() {
         let directory_client = make_test_directory();
-        let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
+        let mut pool = CircuitPool::new(
+            directory_client,
+            make_test_transport(),
+            make_test_handshaker(),
+            3,
+            3,
+            3,
+        );
 
         let failed_id: CircuitId = 5;
 

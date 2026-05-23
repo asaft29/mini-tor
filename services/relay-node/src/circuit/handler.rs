@@ -4,7 +4,7 @@ use crate::circuit::middle::MiddleCircuitHandler;
 use crate::core::metrics::RelayMetrics;
 use common::{
     RelayReadHalf, RelayStream, RelayWriteHalf,
-    crypto::{CipherPair, SessionKey},
+    crypto::{CipherPair, SessionKey, StatefulCipher},
     protocol::{CircuitId, Message, MessageCommand},
 };
 use std::collections::HashMap;
@@ -86,20 +86,22 @@ impl CircuitHandler {
 
     pub fn spawn_nexthop_reader(
         &mut self,
-        circuit_registry: Arc<Mutex<CircuitRegistry>>,
-        client_write: Arc<Mutex<RelayWriteHalf>>,
-        metrics: Arc<RelayMetrics>,
+        io: CircuitIoContext,
     ) -> Option<tokio::task::JoinHandle<()>> {
         match self {
-            CircuitHandler::Entry(handler) => {
-                handler.spawn_nexthop_reader(circuit_registry, client_write, metrics)
-            }
-            CircuitHandler::Middle(handler) => {
-                handler.spawn_nexthop_reader(circuit_registry, client_write, metrics)
-            }
+            CircuitHandler::Entry(handler) => handler.spawn_nexthop_reader(io),
+            CircuitHandler::Middle(handler) => handler.spawn_nexthop_reader(io),
             CircuitHandler::Exit(_) => None,
         }
     }
+}
+
+/// Bundle of shared resources passed to `spawn_nexthop_reader`.
+/// Adding a new shared context (e.g., rate-limiter) only requires a field here.
+pub struct CircuitIoContext {
+    pub circuit_registry: Arc<Mutex<CircuitRegistry>>,
+    pub prev_hop_write: Arc<Mutex<RelayWriteHalf>>,
+    pub metrics: Arc<RelayMetrics>,
 }
 
 /// Registry of all circuits handled by this relay node.
@@ -189,12 +191,11 @@ impl Default for CircuitRegistry {
 }
 
 /// Base circuit context shared by all handler types.
-#[derive(Debug)]
 pub struct CircuitContext {
     pub circuit_id: CircuitId,
     pub state: CircuitState,
     pub session_key: Option<SessionKey>,
-    pub cipher_pair: Option<CipherPair>,
+    pub cipher_pair: Option<Box<dyn StatefulCipher>>,
 }
 
 impl CircuitContext {
@@ -209,7 +210,7 @@ impl CircuitContext {
 
     /// Mark circuit as active with session key and create stateful cipher pair.
     pub fn activate(&mut self, session_key: SessionKey) {
-        self.cipher_pair = Some(CipherPair::new(&session_key));
+        self.cipher_pair = Some(Box::new(CipherPair::new(&session_key)));
         self.session_key = Some(session_key);
         self.state = CircuitState::Active;
     }

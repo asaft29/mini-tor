@@ -6,10 +6,12 @@ RUN apt-get update && apt-get install -y \
     curl \
     pkg-config \
     libssl-dev \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
 COPY services/common ./services/common
+COPY services/proto ./services/proto
 COPY services/discovery ./services/discovery
 COPY services/relay-node ./services/relay-node
 COPY services/tor-client ./services/tor-client

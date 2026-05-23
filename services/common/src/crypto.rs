@@ -13,10 +13,26 @@ use crate::PublicKey;
 
 type Aes128Ctr = Ctr128BE<Aes128>;
 
+/// Abstraction over a stateful stream cipher used for cell encryption/decryption.
+/// Enables swapping the cipher algorithm (e.g., ChaCha20) without changing relay logic.
+pub trait StatefulCipher: Send {
+    fn apply_forward(&mut self, data: &mut [u8]);
+    fn apply_backward(&mut self, data: &mut [u8]);
+}
+
 /// Stateful AES-128-CTR cipher pair for a single circuit hop.
 pub struct CipherPair {
     forward: Aes128Ctr,
     backward: Aes128Ctr,
+}
+
+impl StatefulCipher for CipherPair {
+    fn apply_forward(&mut self, data: &mut [u8]) {
+        self.forward.apply_keystream(data);
+    }
+    fn apply_backward(&mut self, data: &mut [u8]) {
+        self.backward.apply_keystream(data);
+    }
 }
 
 impl CipherPair {
@@ -316,6 +332,56 @@ fn expand_key_seed(key_seed: &[u8; 32]) -> SessionKey {
     forward.copy_from_slice(&key_material[..16]);
     backward.copy_from_slice(&key_material[16..]);
     SessionKey::new(forward, backward)
+}
+
+/// Abstraction over the ntor key-exchange handshake.
+/// Enables injecting test-only handshakes or swapping to alternative protocols.
+pub trait NtorHandshaker: Send + Sync {
+    fn server_handshake(
+        &self,
+        static_secret: &[u8; 32],
+        static_public: &[u8; 32],
+        client_ephemeral_pub: &[u8; 32],
+    ) -> ([u8; 32], [u8; 32], SessionKey);
+
+    fn client_handshake(
+        &self,
+        client_ephemeral_secret_bytes: &[u8; 32],
+        client_ephemeral_pub: &[u8; 32],
+        server_static_pub: &[u8; 32],
+        server_ephemeral_pub: &[u8; 32],
+        auth: &[u8; 32],
+    ) -> Result<SessionKey, crate::TorError>;
+}
+
+pub struct TorNtorHandshaker;
+
+impl NtorHandshaker for TorNtorHandshaker {
+    fn server_handshake(
+        &self,
+        static_secret: &[u8; 32],
+        static_public: &[u8; 32],
+        client_ephemeral_pub: &[u8; 32],
+    ) -> ([u8; 32], [u8; 32], SessionKey) {
+        ntor_server(static_secret, static_public, client_ephemeral_pub)
+    }
+
+    fn client_handshake(
+        &self,
+        client_ephemeral_secret_bytes: &[u8; 32],
+        client_ephemeral_pub: &[u8; 32],
+        server_static_pub: &[u8; 32],
+        server_ephemeral_pub: &[u8; 32],
+        auth: &[u8; 32],
+    ) -> Result<SessionKey, crate::TorError> {
+        ntor_client_finish_raw(
+            client_ephemeral_secret_bytes,
+            client_ephemeral_pub,
+            server_static_pub,
+            server_ephemeral_pub,
+            auth,
+        )
+    }
 }
 
 /// Server (relay) side of the ntor handshake. Returns `(server_ephemeral_public, auth, session_key)`.

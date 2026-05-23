@@ -2,7 +2,7 @@ use crate::circuit::handler::{CircuitContext, CircuitState, NextHop};
 use crate::core::keypair::KeyPair;
 use crate::core::metrics::{EventKind, RelayMetrics};
 use common::{
-    RelayStream, RelayTlsConfig, RelayWriteHalf,
+    RelayStream, RelayTlsConfig,
     crypto::SessionKey,
     protocol::{CircuitId, Message, MessageCommand},
     server_name_from_addr,
@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
 /// How long a relay waits for CREATED from the next hop before giving up.
@@ -308,11 +307,12 @@ impl EntryCircuitHandler {
 
     pub fn spawn_nexthop_reader(
         &mut self,
-        circuit_registry: Arc<Mutex<crate::circuit::handler::CircuitRegistry>>,
-        client_write: Arc<Mutex<RelayWriteHalf>>,
-        metrics: Arc<RelayMetrics>,
+        io: crate::circuit::handler::CircuitIoContext,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let circuit_id = self.context.circuit_id;
+        let circuit_registry = io.circuit_registry;
+        let client_write = io.prev_hop_write;
+        let metrics = io.metrics;
 
         let mut read_half = self.next_hop.as_mut()?.take_read()?;
 
