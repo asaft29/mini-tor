@@ -802,9 +802,15 @@ fn random_padding_interval() -> Duration {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_circuit_id_allocation_monotonic() {
-        let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
+    fn make_test_client() -> DirectoryClient {
+        DirectoryClient::from_channel(
+            tonic::transport::Channel::from_static("http://localhost:8080").connect_lazy(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_circuit_id_allocation_monotonic() {
+        let directory_client = make_test_client();
         let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
 
         let id1 = pool.allocate_circuit_id();
@@ -823,9 +829,9 @@ mod tests {
         assert_ne!(CircuitState::Closing, CircuitState::Closed);
     }
 
-    #[test]
-    fn test_pool_size_configuration() {
-        let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
+    #[tokio::test]
+    async fn test_pool_size_configuration() {
+        let directory_client = make_test_client();
         let pool = CircuitPool::new(directory_client, 5, 3, 3);
         assert_eq!(pool.pool_size, 5);
         assert_eq!(pool.circuit_count(), 0);
@@ -854,9 +860,9 @@ mod tests {
         assert_eq!(wrap_id, 1);
     }
 
-    #[test]
-    fn test_rebuild_failure_increments_counter() {
-        let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
+    #[tokio::test]
+    async fn test_rebuild_failure_increments_counter() {
+        let directory_client = make_test_client();
         let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
 
         // Simulate a failure by manually incrementing the counter (no real TCP).
@@ -874,9 +880,9 @@ mod tests {
         assert!(!pool.is_abandoned(failed_id));
     }
 
-    #[test]
-    fn test_rebuild_failure_abandoned_after_max() {
-        let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
+    #[tokio::test]
+    async fn test_rebuild_failure_abandoned_after_max() {
+        let directory_client = make_test_client();
         let mut pool = CircuitPool::new(directory_client, 3, 3, 2);
 
         let failed_id: CircuitId = 7;
@@ -893,9 +899,9 @@ mod tests {
         assert!(pool.is_abandoned(failed_id));
     }
 
-    #[test]
-    fn test_rebuild_success_resets_counter() {
-        let directory_client = DirectoryClient::new("http://localhost:8080".to_string());
+    #[tokio::test]
+    async fn test_rebuild_success_resets_counter() {
+        let directory_client = make_test_client();
         let mut pool = CircuitPool::new(directory_client, 3, 3, 3);
 
         let failed_id: CircuitId = 5;

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "services/common",
+    "services/proto",
     "services/discovery",
     "services/relay-node",
     "services/tor-client",

@@ -1,8 +1,10 @@
 use clap::Parser;
 use discovery::config::DiscoveryConfig;
+use discovery::grpc::DiscoveryServiceImpl;
 use discovery::metrics::{DiscoveryMetrics, EventKind};
 use discovery::registry::{AppState, NodeRegistry};
 use discovery::routes;
+use proto::discovery::discovery_server::DiscoveryServer;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
@@ -28,12 +30,9 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    tracing::info!("Starting Tor Directory Service...");
+    tracing::info!("Starting Tor Discovery Service...");
 
     let registry = Arc::new(RwLock::new(NodeRegistry::new(config.allow_same_ip)));
-
-    // Metrics are always created — TUI uses them for terminal display,
-    // the web dashboard uses them for the /api/dashboard endpoint.
     let metrics = Some(DiscoveryMetrics::new());
 
     let state = AppState {
@@ -43,16 +42,47 @@ async fn main() -> anyhow::Result<()> {
 
     spawn_background_tasks(registry.clone(), config.stale_timeout_secs, metrics.clone());
 
-    let app = routes::build_router(state);
-
     let bind_addr = config.bind_addr();
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let web_bind_addr = config.web_bind_addr();
 
-    tracing::info!("Directory service listening on http://{}", bind_addr);
+    let grpc_svc = DiscoveryServiceImpl::new(state.clone());
+
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::discovery::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<DiscoveryServer<DiscoveryServiceImpl>>()
+        .await;
+
+    let grpc_listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let web_listener = tokio::net::TcpListener::bind(&web_bind_addr).await?;
+
+    tracing::info!("gRPC service listening on http://{}", bind_addr);
+    tracing::info!("Web UI available at http://{}", web_bind_addr);
 
     if !config.tui {
-        print_api_endpoints();
+        println!("gRPC endpoints on http://{}", bind_addr);
+        println!("  HealthCheck, RegisterNode, RemoveNode, UpdateHeartbeat");
+        println!("  GetAllNodes, GetRandomPath, GetStats");
+        println!("  gRPC reflection enabled (use grpcurl for exploration)");
+        println!();
     }
+
+    let web_router = routes::build_web_router(state.clone());
+
+    let grpc_server = tonic::transport::Server::builder()
+        .accept_http1(true)
+        .add_service(health_service)
+        .add_service(reflection_service)
+        .add_service(DiscoveryServer::new(grpc_svc))
+        .serve_with_incoming_shutdown(
+            tokio_stream::wrappers::TcpListenerStream::new(grpc_listener),
+            shutdown_signal(),
+        );
+
+    let web_server = axum::serve(web_listener, web_router);
 
     if config.tui {
         let tui_metrics = metrics
@@ -61,11 +91,8 @@ async fn main() -> anyhow::Result<()> {
         let tui_registry = registry.clone();
         let tui_addr = bind_addr.clone();
 
-        let server_handle = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .map_err(anyhow::Error::from)
-        });
+        let grpc_handle = tokio::spawn(grpc_server);
+        let web_handle = tokio::spawn(async move { web_server.await });
 
         let tui_handle = tokio::spawn(async move {
             discovery::tui::run_tui(tui_metrics, tui_registry, tui_addr).await
@@ -88,19 +115,34 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            result = server_handle => {
+            result = grpc_handle => {
                 match result {
-                    Ok(Ok(())) => tracing::info!("Server exited"),
-                    Ok(Err(e)) => tracing::error!("Server error: {}", e),
-                    Err(e) => tracing::error!("Server task panicked: {}", e),
+                    Ok(Ok(())) => tracing::info!("gRPC server exited"),
+                    Ok(Err(e)) => tracing::error!("gRPC server error: {}", e),
+                    Err(e) => tracing::error!("gRPC task panicked: {}", e),
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Received shutdown signal");
+            result = web_handle => {
+                match result {
+                    Ok(Ok(())) => tracing::info!("Web server exited"),
+                    Ok(Err(e)) => tracing::error!("Web server error: {}", e),
+                    Err(e) => tracing::error!("Web task panicked: {}", e),
+                }
             }
         }
     } else {
-        axum::serve(listener, app).await?;
+        tokio::select! {
+            result = grpc_server => {
+                if let Err(e) = result {
+                    tracing::error!("gRPC server error: {}", e);
+                }
+            }
+            result = web_server => {
+                if let Err(e) = result {
+                    tracing::error!("Web server error: {}", e);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -131,19 +173,7 @@ fn spawn_background_tasks(
     });
 }
 
-/// Print available API endpoints
-fn print_api_endpoints() {
-    tracing::info!("API endpoints:");
-    tracing::info!("  GET    /health                     - Health check (always 200)");
-    tracing::info!(
-        "  GET    /ready                      - Readiness check (503 if insufficient nodes)"
-    );
-    tracing::info!("  POST   /api/nodes/register         - Register a relay node");
-    tracing::info!("  GET    /api/nodes                  - List all nodes");
-    tracing::info!("  GET    /api/nodes/random           - Get random path (3 nodes)");
-    tracing::info!("  POST   /api/nodes/{{id}}/heartbeat   - Update heartbeat");
-    tracing::info!("  DELETE /api/nodes/{{id}}             - Remove node");
-    tracing::info!("  GET    /api/stats                  - Get statistics");
-    tracing::info!("  GET    /swagger-ui                 - OpenAPI documentation UI");
-    tracing::info!("  GET    /api-docs/openapi.json      - OpenAPI specification");
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c().await.ok();
+    tracing::info!("Received shutdown signal");
 }

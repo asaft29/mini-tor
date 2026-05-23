@@ -16,7 +16,10 @@ use common::{
 use config::RelayConfig;
 use keypair::KeyPair;
 use metrics::{EventKind, RelayMetrics};
-use reqwest::Client;
+use proto::discovery::{
+    HeartbeatRequest, NodeDescriptor as ProtoNodeDescriptor, RemoveNodeRequest,
+    discovery_client::DiscoveryClient,
+};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpListener,
@@ -90,9 +93,13 @@ async fn main() -> Result<()> {
         tls_cert_fingerprint: tls_config.fingerprint.clone(),
     };
 
-    let http_client = Client::new();
+    let channel = tonic::transport::Channel::from_shared(config.directory_url.clone())?
+        .connect()
+        .await
+        .context("Failed to connect to discovery gRPC service")?;
+    let mut grpc_client = DiscoveryClient::new(channel.clone());
 
-    register_with_directory(&http_client, &config.directory_url, &descriptor).await?;
+    register_with_directory(&mut grpc_client, &descriptor).await?;
 
     let circuit_registry = Arc::new(Mutex::new(CircuitRegistry::new()));
     let relay_metrics = RelayMetrics::new();
@@ -101,8 +108,7 @@ async fn main() -> Result<()> {
     info!("Listening on {}", bind_addr);
 
     let heartbeat_handle = tokio::spawn(heartbeat_loop(
-        http_client.clone(),
-        config.directory_url.clone(),
+        channel.clone(),
         node_id.clone(),
         config.heartbeat_interval,
         circuit_registry.clone(),
@@ -172,7 +178,7 @@ async fn main() -> Result<()> {
     }
 
     info!("Unregistering from directory service...");
-    if let Err(e) = unregister_from_directory(&http_client, &config.directory_url, &node_id).await {
+    if let Err(e) = unregister_from_directory(&mut DiscoveryClient::new(channel), &node_id).await {
         warn!("Failed to unregister: {}", e);
     }
 
@@ -181,73 +187,46 @@ async fn main() -> Result<()> {
 }
 
 async fn register_with_directory(
-    client: &Client,
-    directory_url: &str,
+    client: &mut DiscoveryClient<tonic::transport::Channel>,
     descriptor: &NodeDescriptor,
 ) -> Result<()> {
-    let url = format!("{}/api/nodes/register", directory_url);
+    let proto_desc = ProtoNodeDescriptor::from(descriptor.clone());
+    let request = tonic::Request::new(proto_desc);
 
-    info!("Registering with directory service at {}", url);
-
-    let response = client.post(&url).json(descriptor).send().await?;
-
-    if response.status().is_success() {
-        info!("Successfully registered with directory service");
-        Ok(())
-    } else {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
-        Err(anyhow::anyhow!(
-            "Failed to register with directory: {} - {}",
-            status,
-            body
-        ))
-    }
+    info!("Registering with directory service via gRPC");
+    let response = client.register_node(request).await?;
+    info!(
+        "Successfully registered with directory service: {}",
+        response.into_inner().message
+    );
+    Ok(())
 }
 
 async fn unregister_from_directory(
-    client: &Client,
-    directory_url: &str,
+    client: &mut DiscoveryClient<tonic::transport::Channel>,
     node_id: &str,
 ) -> Result<()> {
-    let url = format!("{}/api/nodes/{}", directory_url, node_id);
+    let request = tonic::Request::new(RemoveNodeRequest {
+        node_id: node_id.to_string(),
+    });
 
-    let response = client.delete(&url).send().await?;
-
-    if response.status().is_success() {
-        info!("Successfully unregistered from directory service");
-        Ok(())
-    } else {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
-        Err(anyhow::anyhow!(
-            "Failed to unregister from directory: {} - {}",
-            status,
-            body
-        ))
-    }
+    client.remove_node(request).await?;
+    info!("Successfully unregistered from directory service");
+    Ok(())
 }
 
 async fn heartbeat_loop(
-    client: Client,
-    directory_url: String,
+    channel: tonic::transport::Channel,
     node_id: String,
     interval_secs: u64,
     circuit_registry: Arc<Mutex<CircuitRegistry>>,
     metrics: Arc<RelayMetrics>,
 ) {
     let mut ticker = interval(Duration::from_secs(interval_secs));
+    let mut client = DiscoveryClient::new(channel);
 
     loop {
         ticker.tick().await;
-
-        let url = format!("{}/api/nodes/{}/heartbeat", directory_url, node_id);
 
         let body = NodeMetrics {
             connections_accepted: metrics.get_connections(),
@@ -260,15 +239,17 @@ async fn heartbeat_loop(
             uptime_secs: metrics.uptime().as_secs(),
         };
 
-        match client.post(&url).json(&body).send().await {
-            Ok(response) if response.status().is_success() => {
+        let request = tonic::Request::new(HeartbeatRequest {
+            node_id: node_id.clone(),
+            metrics: Some(body.into()),
+        });
+
+        match client.update_heartbeat(request).await {
+            Ok(_) => {
                 debug!("Heartbeat sent successfully");
             }
-            Ok(response) => {
-                warn!("Heartbeat failed with status: {}", response.status());
-            }
             Err(e) => {
-                error!("Failed to send heartbeat: {}", e);
+                warn!("Heartbeat failed: {e}");
             }
         }
     }

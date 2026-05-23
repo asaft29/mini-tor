@@ -35,7 +35,7 @@ impl NodeEntry {
 }
 
 /// Registry statistics snapshot.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct RegistryStats {
     pub total_nodes: usize,
     pub entry_count: usize,

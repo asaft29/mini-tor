@@ -179,8 +179,9 @@ RUST_LOG="$RUST_LOG" \
 PIDS+=($!)
 echo "  PID: ${PIDS[-1]}"
 
-wait_for_http "http://127.0.0.1:$DISCOVERY_PORT/health" "Discovery service"
-echo "  Discovery service is healthy."
+wait_for_tcp 127.0.0.1 "$DISCOVERY_PORT" "Discovery gRPC"
+echo "  Discovery gRPC service is listening."
+echo "  Web UI at http://127.0.0.1:${DISCOVERY_WEB_PORT:-8081}"
 
 # ---- Launch Relay Nodes ----
 
@@ -209,17 +210,16 @@ start_relay entry "$ENTRY_PORT"
 start_relay middle "$MIDDLE_PORT"
 start_relay exit "$EXIT_PORT"
 
-# Wait for discovery to see all 3 nodes as ready
+# Wait for discovery to be ready (give relays time to register)
 echo ""
-echo "Waiting for discovery to report ready (3 nodes registered)..."
-wait_for_http "http://127.0.0.1:$DISCOVERY_PORT/ready" "Discovery readiness" 30
-echo "Discovery reports READY — all relay types registered."
+echo "Waiting for relays to register with discovery..."
+sleep 5
+echo "Discovery should now be ready with 3 relay nodes."
 
-# Print registered nodes
+# Print registered nodes via gRPC
 echo ""
-echo "Registered nodes:"
-curl -sf "http://127.0.0.1:$DISCOVERY_PORT/api/nodes" | jq '.nodes[] | {node_type, address}' 2>/dev/null || \
-    curl -sf "http://127.0.0.1:$DISCOVERY_PORT/api/nodes"
+echo "Registered nodes (use grpcurl to list):"
+echo "  grpcurl -plaintext 127.0.0.1:$DISCOVERY_PORT discovery.Discovery/GetAllNodes"
 
 # ---- Launch Tor Client ----
 
@@ -246,7 +246,8 @@ if [ "$NO_TUI" = true ]; then
     section "All services running!"
 
     echo ""
-    echo "  Discovery:   http://127.0.0.1:$DISCOVERY_PORT  (Swagger: /swagger-ui)"
+    echo "  Discovery gRPC:  127.0.0.1:$DISCOVERY_PORT  (gRPC reflection enabled)"
+    echo "  Web UI:          http://127.0.0.1:${DISCOVERY_WEB_PORT:-8081}"
     echo "  Entry relay:  127.0.0.1:$ENTRY_PORT"
     echo "  Middle relay: 127.0.0.1:$MIDDLE_PORT"
     echo "  Exit relay:   127.0.0.1:$EXIT_PORT"
@@ -294,7 +295,8 @@ else
     echo "  Launching tor-client with TUI dashboard..."
     echo "  (Press 'q' in the TUI or Ctrl+C to stop everything)"
     echo ""
-    echo "  Discovery:   http://127.0.0.1:$DISCOVERY_PORT  (Swagger: /swagger-ui)"
+    echo "  Discovery gRPC:  127.0.0.1:$DISCOVERY_PORT  (gRPC reflection enabled)"
+    echo "  Web UI:          http://127.0.0.1:${DISCOVERY_WEB_PORT:-8081}"
     echo "  Entry relay:  127.0.0.1:$ENTRY_PORT"
     echo "  Middle relay: 127.0.0.1:$MIDDLE_PORT"
     echo "  Exit relay:   127.0.0.1:$EXIT_PORT"

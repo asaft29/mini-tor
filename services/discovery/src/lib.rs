@@ -1,7 +1,7 @@
 pub mod assets;
 pub mod config;
-pub mod doc;
 pub mod error;
+pub mod grpc;
 pub mod handlers;
 pub mod metrics;
 pub mod registry;

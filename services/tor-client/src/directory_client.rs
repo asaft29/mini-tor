@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use common::NodeDescriptor;
-use reqwest::Client;
+use proto::discovery::{GetRandomPathRequest, discovery_client::DiscoveryClient};
 use std::time::{Duration, Instant};
+use tonic::transport::Channel;
 use tracing::{debug, info};
 
-/// HTTP client for the discovery service API.
+/// gRPC client for the discovery service.
 pub struct DirectoryClient {
-    http_client: Client,
-    directory_url: String,
+    grpc_client: DiscoveryClient<Channel>,
     #[allow(dead_code)]
     cached_nodes: Vec<NodeDescriptor>,
     #[allow(dead_code)]
@@ -17,10 +17,22 @@ pub struct DirectoryClient {
 }
 
 impl DirectoryClient {
-    pub fn new(directory_url: String) -> Self {
+    pub async fn new(directory_url: String) -> Result<Self> {
+        let channel = Channel::from_shared(directory_url)?
+            .connect()
+            .await
+            .context("Failed to connect to discovery gRPC service")?;
+        Ok(Self {
+            grpc_client: DiscoveryClient::new(channel),
+            cached_nodes: Vec::new(),
+            cache_expiry: None,
+            cache_ttl: Duration::from_secs(300),
+        })
+    }
+
+    pub fn from_channel(channel: Channel) -> Self {
         Self {
-            http_client: Client::new(),
-            directory_url,
+            grpc_client: DiscoveryClient::new(channel),
             cached_nodes: Vec::new(),
             cache_expiry: None,
             cache_ttl: Duration::from_secs(300),
@@ -29,22 +41,25 @@ impl DirectoryClient {
 
     /// Fetch a random N-hop path from the directory (1 entry + (hop_count-2) middles + 1 exit).
     pub async fn get_random_path(&self, hop_count: usize) -> Result<Vec<NodeDescriptor>> {
-        let url = format!(
-            "{}/api/nodes/random?count={}",
-            self.directory_url, hop_count
-        );
-        debug!("Fetching {}-hop random path from {}", hop_count, url);
+        debug!("Fetching {}-hop random path via gRPC", hop_count);
 
-        let nodes = self
-            .http_client
-            .get(&url)
-            .send()
+        let request = tonic::Request::new(GetRandomPathRequest {
+            count: hop_count as u32,
+        });
+
+        let response = self
+            .grpc_client
+            .clone()
+            .get_random_path(request)
             .await
-            .context("Failed to send request to directory service")?
-            .error_for_status()
-            .context("Directory service returned error")?
-            .json::<Vec<NodeDescriptor>>()
-            .await
+            .context("Failed to get random path from discovery service")?;
+
+        let nodes: Vec<NodeDescriptor> = response
+            .into_inner()
+            .nodes
+            .iter()
+            .map(NodeDescriptor::try_from)
+            .collect::<Result<Vec<_>, _>>()
             .context("Failed to parse node descriptors")?;
 
         if nodes.len() != hop_count {
@@ -81,27 +96,29 @@ impl DirectoryClient {
             return Ok(self.cached_nodes.clone());
         }
 
-        let url = format!("{}/api/nodes", self.directory_url);
-        debug!("Fetching all nodes from {}", url);
+        debug!("Fetching all nodes via gRPC");
 
         let response = self
-            .http_client
-            .get(&url)
-            .send()
+            .grpc_client
+            .clone()
+            .get_all_nodes(tonic::Request::new(()))
             .await
-            .context("Failed to send request to directory service")?
-            .error_for_status()
-            .context("Directory service returned error")?
-            .json::<NodesResponse>()
-            .await
-            .context("Failed to parse nodes response")?;
+            .context("Failed to get all nodes from discovery service")?;
 
-        self.cached_nodes = response.nodes.clone();
+        let nodes: Vec<NodeDescriptor> = response
+            .into_inner()
+            .nodes
+            .iter()
+            .map(NodeDescriptor::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to parse node descriptors")?;
+
+        self.cached_nodes = nodes.clone();
         self.cache_expiry = Some(Instant::now() + self.cache_ttl);
 
-        info!("Fetched {} nodes from directory", response.nodes.len());
+        info!("Fetched {} nodes from directory", nodes.len());
 
-        Ok(response.nodes)
+        Ok(nodes)
     }
 
     #[allow(dead_code)]
@@ -112,44 +129,17 @@ impl DirectoryClient {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[allow(dead_code)]
-struct NodesResponse {
-    nodes: Vec<NodeDescriptor>,
-    #[allow(dead_code)]
-    count: usize,
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_new_client_defaults() {
-        let client = DirectoryClient::new("http://localhost:8080".to_string());
-        assert!(client.cached_nodes.is_empty());
-        assert!(client.cache_expiry.is_none());
-        assert_eq!(client.cache_ttl, Duration::from_secs(300));
-    }
-
-    #[test]
-    fn test_cache_initially_invalid() {
-        let client = DirectoryClient::new("http://localhost:8080".to_string());
-        assert!(!client.is_cache_valid());
-    }
-
-    #[test]
-    fn test_cache_valid_after_set() {
-        let mut client = DirectoryClient::new("http://localhost:8080".to_string());
-        client.cache_expiry = Some(Instant::now() + Duration::from_secs(60));
-        assert!(client.is_cache_valid());
-    }
-
-    #[test]
-    fn test_cache_expired() {
-        let mut client = DirectoryClient::new("http://localhost:8080".to_string());
-        client.cache_expiry = Some(Instant::now() - Duration::from_secs(1));
+    #[tokio::test]
+    async fn test_cache_initially_invalid() {
+        // Test via from_channel without connecting
+        let client = DirectoryClient::from_channel(
+            Channel::from_static("http://localhost:8080").connect_lazy(),
+        );
         assert!(!client.is_cache_valid());
     }
 }

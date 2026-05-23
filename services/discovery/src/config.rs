@@ -9,6 +9,9 @@ pub struct DiscoveryConfig {
     #[arg(long, default_value = "8080")]
     pub port: u16,
 
+    #[arg(long, default_value = "8081")]
+    pub web_port: u16,
+
     #[arg(long, default_value = "0.0.0.0")]
     pub host: String,
 
@@ -26,6 +29,10 @@ impl DiscoveryConfig {
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
+
+    pub fn web_bind_addr(&self) -> String {
+        format!("{}:{}", self.host, self.web_port)
+    }
 }
 
 #[cfg(test)]
@@ -37,6 +44,7 @@ mod tests {
     fn test_default_config() {
         let config = DiscoveryConfig::parse_from(["discovery"]);
         assert_eq!(config.port, 8080);
+        assert_eq!(config.web_port, 8081);
         assert_eq!(config.host, "0.0.0.0");
         assert!(!config.tui);
         assert_eq!(config.stale_timeout_secs, 120);
