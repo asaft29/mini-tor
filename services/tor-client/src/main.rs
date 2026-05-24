@@ -11,6 +11,7 @@ use tor_client::core::config::{MAX_HOPS, TorClientConfig};
 use tor_client::core::metrics::ClientMetrics;
 use tor_client::core::transport::TcpTlsTransport;
 use tracing::{error, info};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,7 +38,18 @@ async fn main() -> Result<()> {
     }
 
     if config.tui {
-        tracing_subscriber::fmt().with_writer(std::io::sink).init();
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/tor-client.log")
+            .context("Failed to open log file")?;
+        tracing_subscriber::fmt()
+            .with_writer(std::io::sink.and(log_file))
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "tor_client=info".into()),
+            )
+            .init();
     } else {
         tracing_subscriber::fmt::init();
     }

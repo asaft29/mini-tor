@@ -81,11 +81,13 @@ struct CircuitRow {
     state: String,
     state_color: Color,
     streams: String,
+    age: String,
     path: String,
 }
 
 async fn collect_circuit_rows(pool: &Arc<Mutex<CircuitPool>>) -> Vec<CircuitRow> {
     let pool_guard = pool.lock().await;
+    let now = std::time::Instant::now();
     let mut rows = Vec::new();
 
     for (&circuit_id, circuit_arc) in pool_guard.iter_circuits() {
@@ -97,11 +99,17 @@ async fn collect_circuit_rows(pool: &Arc<Mutex<CircuitPool>>) -> Vec<CircuitRow>
             CircuitState::Closed => ("Closed", Color::Red),
         };
 
+        let age_str = pool_guard
+            .circuit_age(circuit_id, now)
+            .map(|d| format!("{}s", d.as_secs()))
+            .unwrap_or_default();
+
         rows.push(CircuitRow {
             circuit_id: format!("{:05}", circuit_id),
             state: state_str.to_string(),
             state_color,
             streams: circuit.active_stream_count().to_string(),
+            age: age_str,
             path: circuit
                 .path_display
                 .as_deref()
@@ -302,6 +310,7 @@ fn render_ui(
         Cell::from("CID").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("State").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("Streams").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Age").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("Path").style(Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
@@ -312,6 +321,7 @@ fn render_ui(
                 Cell::from(cr.circuit_id.clone()),
                 Cell::from(cr.state.clone()).style(Style::default().fg(cr.state_color)),
                 Cell::from(cr.streams.clone()),
+                Cell::from(cr.age.clone()),
                 Cell::from(cr.path.clone()),
             ])
         })
@@ -323,6 +333,7 @@ fn render_ui(
             Constraint::Length(7),
             Constraint::Length(10),
             Constraint::Length(9),
+            Constraint::Length(6),
             Constraint::Min(20),
         ],
     )

@@ -22,9 +22,12 @@ use common::{
 };
 use rand_core::OsRng;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tor_client::core::circuit::CircuitBuilder;
+use tokio::sync::Mutex;
+use tor_client::client::mock::MockDirectory;
+use tor_client::core::circuit::{CircuitBuilder, CircuitPool, CircuitState};
 use tor_client::core::transport::TcpTlsTransport;
 use tor_llcrypto::pk::curve25519::{PublicKey as X25519PublicKey, StaticSecret};
 
@@ -425,4 +428,65 @@ async fn test_build_fails_on_unreachable_entry() {
     )
     .await;
     assert!(result.is_err());
+}
+
+/// Verify that aged circuits are expired and replaced with functional circuits.
+#[tokio::test]
+async fn test_circuit_age_expiry_rebuilds_functional_circuit() {
+    let entry_id = RelayIdentity::generate();
+    let middle_id = RelayIdentity::generate();
+    let exit_id = RelayIdentity::generate();
+
+    let entry_pub = PublicKey::new(entry_id.public_bytes);
+    let middle_pub = PublicKey::new(middle_id.public_bytes);
+    let exit_pub = PublicKey::new(exit_id.public_bytes);
+
+    let entry_tls = RelayTlsConfig::generate("test-entry", "127.0.0.1:0".parse().unwrap()).unwrap();
+    let middle_tls =
+        RelayTlsConfig::generate("test-middle", "127.0.0.1:0".parse().unwrap()).unwrap();
+    let exit_tls = RelayTlsConfig::generate("test-exit", "127.0.0.1:0".parse().unwrap()).unwrap();
+
+    let entry_fp = entry_tls.fingerprint.clone();
+    let middle_fp = middle_tls.fingerprint.clone();
+    let exit_fp = exit_tls.fingerprint.clone();
+
+    let exit_addr = spawn_exit_relay(exit_id, exit_tls.acceptor.clone()).await;
+    let middle_addr = spawn_middle_relay(middle_id, middle_tls.acceptor.clone()).await;
+    let entry_addr = spawn_entry_relay(entry_id, entry_tls.acceptor.clone()).await;
+
+    let path = vec![
+        node_at("entry", NodeType::Entry, entry_addr, entry_pub, entry_fp),
+        node_at(
+            "middle",
+            NodeType::Middle,
+            middle_addr,
+            middle_pub,
+            middle_fp,
+        ),
+        node_at("exit", NodeType::Exit, exit_addr, exit_pub, exit_fp),
+    ];
+
+    let mock_dir = Arc::new(MockDirectory::new(vec![path]));
+    let transport = Arc::new(TcpTlsTransport);
+    let handshaker = Arc::new(common::crypto::TorNtorHandshaker);
+
+    let pool = Arc::new(Mutex::new(CircuitPool::new(
+        mock_dir, transport, handshaker, 1, 3, 3,
+    )));
+
+    // Build the initial circuit via real TLS+ntor.
+    let circuits = pool.lock().await.initialize().await.unwrap();
+    assert_eq!(circuits.len(), 1);
+    let original_id = circuits[0].0.lock().await.circuit_id;
+    assert_eq!(circuits[0].0.lock().await.state, CircuitState::Ready);
+
+    // Expire immediately.
+    let mut g = pool.lock().await;
+    g.set_max_circuit_age(Duration::ZERO);
+    let expired = g.expire_aged_circuits(Instant::now()).await;
+    assert_eq!(expired, vec![original_id]);
+    assert_eq!(g.circuit_count(), 1);
+
+    let arc = g.get_circuit(original_id).unwrap();
+    assert_eq!(arc.lock().await.state, CircuitState::Closed);
 }

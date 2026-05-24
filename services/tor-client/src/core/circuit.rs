@@ -391,7 +391,7 @@ impl CircuitPool {
             rebuild_failure_counts: HashMap::new(),
             abandoned_slots: HashSet::new(),
             circuit_ages: HashMap::new(),
-            max_circuit_age: Duration::from_secs(600), // 10 minutes
+            max_circuit_age: Duration::from_secs(15),
         }
     }
 
@@ -401,6 +401,39 @@ impl CircuitPool {
 
     pub fn metrics(&self) -> Option<&Arc<ClientMetrics>> {
         self.metrics.as_ref()
+    }
+
+    pub fn set_max_circuit_age(&mut self, age: Duration) {
+        self.max_circuit_age = age;
+    }
+
+    /// Move idle Ready circuits older than `max_circuit_age` to `Closing`.
+    /// Returns the circuit IDs that were expired.
+    pub async fn expire_aged_circuits(&mut self, now: Instant) -> Vec<CircuitId> {
+        let to_expire: Vec<CircuitId> = self
+            .circuit_ages
+            .iter()
+            .filter_map(|(&id, &created)| {
+                if now.duration_since(created) >= self.max_circuit_age {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut expired = Vec::new();
+        for id in to_expire {
+            if let Some(circuit) = self.circuits.get(&id).cloned() {
+                let mut c = circuit.lock().await;
+                if c.state == CircuitState::Ready && c.active_stream_count() == 0 {
+                    c.state = CircuitState::Closed;
+                    self.circuit_ages.remove(&id);
+                    expired.push(id);
+                }
+            }
+        }
+        expired
     }
 
     /// Pre-build circuits to fill the pool at startup.
@@ -593,6 +626,18 @@ impl CircuitPool {
         self.circuits.len()
     }
 
+    /// Cloned `Arc` to a circuit by ID, for external inspection.
+    pub fn get_circuit(&self, id: CircuitId) -> Option<Arc<Mutex<Circuit>>> {
+        self.circuits.get(&id).cloned()
+    }
+
+    /// Returns the age of a circuit, or `None` if the circuit ID is unknown.
+    pub fn circuit_age(&self, id: CircuitId, now: Instant) -> Option<Duration> {
+        self.circuit_ages
+            .get(&id)
+            .map(|&created| now.duration_since(created))
+    }
+
     pub fn iter_circuits(
         &self,
     ) -> std::collections::hash_map::Iter<'_, CircuitId, Arc<Mutex<Circuit>>> {
@@ -720,37 +765,16 @@ pub fn spawn_circuit_monitor(
             tokio::time::sleep(check_interval).await;
 
             // Expire aged circuits that are idle (Ready with no active streams).
-            let now = Instant::now();
-            let to_expire: Vec<CircuitId> = {
-                let g = pool.lock().await;
-                g.circuit_ages
-                    .iter()
-                    .filter_map(|(&id, &created)| {
-                        if now.duration_since(created) >= g.max_circuit_age {
-                            Some(id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+            let expired_ids: Vec<CircuitId> = {
+                let mut g = pool.lock().await;
+                g.expire_aged_circuits(Instant::now()).await
             };
-            for id in to_expire {
-                let circuit = {
-                    let g = pool.lock().await;
-                    g.circuits.get(&id).cloned()
-                };
-                if let Some(circuit) = circuit {
-                    let mut c = circuit.lock().await;
-                    if c.state == CircuitState::Ready && c.active_stream_count() == 0 {
-                        info!(
-                            "Circuit {} aged out ({}s), rotating",
-                            id,
-                            pool.lock().await.max_circuit_age.as_secs()
-                        );
-                        c.state = CircuitState::Closing;
-                        pool.lock().await.circuit_ages.remove(&id);
-                    }
-                }
+            for id in expired_ids {
+                info!(
+                    "Circuit {} aged out ({}s), rotating",
+                    id,
+                    pool.lock().await.max_circuit_age.as_secs()
+                );
             }
 
             let failed_ids: Vec<CircuitId> = {
@@ -1029,5 +1053,113 @@ mod tests {
             0
         );
         assert!(!pool.is_abandoned(failed_id));
+    }
+
+    /// Helper: construct a minimal Circuit for expiry unit tests.
+    fn make_minimal_circuit(state: CircuitState, circuit_id: CircuitId) -> Circuit {
+        let (a, _b) = tokio::io::duplex(1);
+        let boxed: common::RelayStream = Box::new(a);
+        let (_, write_half) = tokio::io::split(boxed);
+        Circuit {
+            circuit_id,
+            state,
+            entry_writer: Arc::new(Mutex::new(write_half)),
+            onion_keys: make_dummy_onion_keys(),
+            stream_senders: HashMap::new(),
+            next_stream_id: 1,
+            path_display: None,
+        }
+    }
+
+    fn make_dummy_onion_keys() -> crate::core::crypto_engine::OnionKeys {
+        crate::core::crypto_engine::OnionKeys {
+            session_keys: Vec::new(),
+            ciphers: Vec::new(),
+            forward_digest: common::crypto::RunningDigest::new(),
+            backward_digest: common::crypto::RunningDigest::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_circuit_age_expiry_sets_closing() {
+        let mut pool = CircuitPool::new(
+            make_test_directory(),
+            make_test_transport(),
+            make_test_handshaker(),
+            3,
+            3,
+            3,
+        );
+        pool.set_max_circuit_age(Duration::ZERO);
+
+        let circuit_id = 42;
+        pool.circuits.insert(
+            circuit_id,
+            Arc::new(Mutex::new(make_minimal_circuit(
+                CircuitState::Ready,
+                circuit_id,
+            ))),
+        );
+        pool.circuit_ages
+            .insert(circuit_id, Instant::now() - Duration::from_secs(1));
+
+        let expired = pool.expire_aged_circuits(Instant::now()).await;
+        assert_eq!(expired, vec![circuit_id]);
+
+        let c = pool.circuits.get(&circuit_id).unwrap().lock().await;
+        assert_eq!(c.state, CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_young_circuits_not_expired() {
+        let mut pool = CircuitPool::new(
+            make_test_directory(),
+            make_test_transport(),
+            make_test_handshaker(),
+            3,
+            3,
+            3,
+        );
+        pool.set_max_circuit_age(Duration::from_secs(3600));
+
+        pool.circuits.insert(
+            1,
+            Arc::new(Mutex::new(make_minimal_circuit(CircuitState::Ready, 1))),
+        );
+        pool.circuit_ages.insert(1, Instant::now());
+
+        let expired = pool.expire_aged_circuits(Instant::now()).await;
+        assert!(expired.is_empty());
+
+        let c = pool.circuits.get(&1).unwrap().lock().await;
+        assert_eq!(c.state, CircuitState::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_expiry_skips_busy_circuits() {
+        let mut pool = CircuitPool::new(
+            make_test_directory(),
+            make_test_transport(),
+            make_test_handshaker(),
+            3,
+            3,
+            3,
+        );
+        pool.set_max_circuit_age(Duration::ZERO);
+
+        let mut circuit = make_minimal_circuit(CircuitState::Ready, 99);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        circuit.register_stream(1, tx);
+        assert_eq!(circuit.active_stream_count(), 1);
+
+        pool.circuits.insert(99, Arc::new(Mutex::new(circuit)));
+        pool.circuit_ages
+            .insert(99, Instant::now() - Duration::from_secs(1));
+
+        let expired = pool.expire_aged_circuits(Instant::now()).await;
+        assert!(expired.is_empty());
+
+        let c = pool.circuits.get(&99).unwrap().lock().await;
+        assert_eq!(c.state, CircuitState::Ready);
     }
 }
