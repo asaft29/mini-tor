@@ -20,7 +20,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpListener,
     signal,
-    sync::Mutex,
+    sync::{Mutex, Semaphore},
     time::{Duration, interval},
 };
 use tracing::{debug, error, info, warn};
@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
         node_type,
         relay_metrics.clone(),
         tls_config.acceptor,
+        500,
     ));
 
     info!("Relay node started successfully. Press Ctrl+C to stop.");
@@ -257,7 +258,9 @@ async fn accept_connections(
     node_type: common::NodeType,
     metrics: Arc<RelayMetrics>,
     tls_acceptor: Arc<dyn common::tls::StreamAcceptor>,
+    max_concurrent: usize,
 ) {
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
     loop {
         match listener.accept().await {
             Ok((tcp_stream, addr)) => {
@@ -270,11 +273,23 @@ async fn accept_connections(
                     peer: addr.to_string(),
                 });
 
+                let permit = match semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(
+                            "Connection from {} rejected: relay at max capacity ({})",
+                            addr, max_concurrent
+                        );
+                        continue;
+                    }
+                };
+
                 let registry = circuit_registry.clone();
                 let kp = keypair.clone();
                 let m = metrics.clone();
                 let tls_acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     match tls_acceptor.accept(tcp_stream).await {
                         Ok(stream) => {
                             handle_connection(stream, addr, registry, kp, node_type, m).await;

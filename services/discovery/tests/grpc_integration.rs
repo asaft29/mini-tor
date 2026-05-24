@@ -6,7 +6,7 @@
 
 use common::{NodeDescriptor, NodeMetrics, NodeType, PublicKey};
 use discovery::api::grpc::DiscoveryServiceImpl;
-use discovery::core::registry::{AppState, NodeRegistry};
+use discovery::core::registry::{AppState, NodeRegistry, RateLimiter};
 use discovery::core::store::NodeRegistryStore;
 use proto::services::{
     GetAllNodesResponse, GetRandomPathRequest, HeartbeatRequest, RemoveNodeRequest,
@@ -22,6 +22,9 @@ fn fresh_state() -> AppState {
     AppState {
         registry: Arc::new(NodeRegistryStore::new(raw)),
         metrics: None,
+        path_rate_limiter: Arc::new(tokio::sync::Mutex::new(RateLimiter::new(
+            std::time::Duration::ZERO,
+        ))),
     }
 }
 

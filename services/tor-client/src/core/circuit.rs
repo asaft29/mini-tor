@@ -14,7 +14,7 @@ use common::{
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
@@ -362,10 +362,11 @@ pub struct CircuitPool {
     hop_count: usize,
     metrics: Option<Arc<ClientMetrics>>,
     max_rebuild_attempts: usize,
-    /// Consecutive rebuild failure count per circuit slot.
     rebuild_failure_counts: HashMap<CircuitId, usize>,
-    /// Slots that exhausted their retries and should no longer be rebuilt.
     abandoned_slots: HashSet<CircuitId>,
+    circuit_ages: HashMap<CircuitId, Instant>,
+    /// Circuits older than this are rotated out even if healthy (10 minutes, matches real Tor).
+    max_circuit_age: Duration,
 }
 
 impl CircuitPool {
@@ -389,6 +390,8 @@ impl CircuitPool {
             max_rebuild_attempts,
             rebuild_failure_counts: HashMap::new(),
             abandoned_slots: HashSet::new(),
+            circuit_ages: HashMap::new(),
+            max_circuit_age: Duration::from_secs(600), // 10 minutes
         }
     }
 
@@ -564,6 +567,7 @@ impl CircuitPool {
 
         self.circuits
             .insert(circuit_id, Arc::new(Mutex::new(built.circuit)));
+        self.circuit_ages.insert(circuit_id, Instant::now());
 
         if let Some(ref metrics) = self.metrics {
             metrics
@@ -714,6 +718,40 @@ pub fn spawn_circuit_monitor(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(check_interval).await;
+
+            // Expire aged circuits that are idle (Ready with no active streams).
+            let now = Instant::now();
+            let to_expire: Vec<CircuitId> = {
+                let g = pool.lock().await;
+                g.circuit_ages
+                    .iter()
+                    .filter_map(|(&id, &created)| {
+                        if now.duration_since(created) >= g.max_circuit_age {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            for id in to_expire {
+                let circuit = {
+                    let g = pool.lock().await;
+                    g.circuits.get(&id).cloned()
+                };
+                if let Some(circuit) = circuit {
+                    let mut c = circuit.lock().await;
+                    if c.state == CircuitState::Ready && c.active_stream_count() == 0 {
+                        info!(
+                            "Circuit {} aged out ({}s), rotating",
+                            id,
+                            pool.lock().await.max_circuit_age.as_secs()
+                        );
+                        c.state = CircuitState::Closing;
+                        pool.lock().await.circuit_ages.remove(&id);
+                    }
+                }
+            }
 
             let failed_ids: Vec<CircuitId> = {
                 let g = pool.lock().await;
