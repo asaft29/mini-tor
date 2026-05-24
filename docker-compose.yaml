@@ -1,7 +1,7 @@
 # docker-compose.yaml — Full onion routing demo
 #
 # Launches all 5 services on a shared Docker network:
-#   - discovery    (REST API on port 8080)
+#   - discovery    (gRPC API on port 8080)
 #   - relay-entry  (entry node on port 9001)
 #   - relay-middle (middle node on port 9002)
 #   - relay-exit   (exit node on port 9003)
@@ -30,11 +30,11 @@ services:
     volumes:
       - discovery-data:/app/data
     environment:
-      - RUST_LOG=discovery=info,tower_http=info
+      - RUST_LOG=discovery=info
       - CONSENSUS_PATH=/app/data/consensus.json
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      test: ["CMD", "nc", "-z", "localhost", "8080"]
       interval: 10s
       timeout: 5s
       retries: 5
