@@ -15,9 +15,9 @@ use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 /// How long a relay waits for CREATED from the next hop before giving up.
-/// Must be less than the client's HANDSHAKE_TIMEOUT (30s) so the relay can
+/// Must be less than the client's HANDSHAKE_TIMEOUT (60s) so the relay can
 /// return a clean error rather than the client timing out with a confusing message.
-const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(50);
 
 /// Middle node circuit handler — second hop, knows neither client nor destination.
 pub struct MiddleCircuitHandler {

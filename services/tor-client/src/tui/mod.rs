@@ -95,6 +95,7 @@ async fn collect_circuit_rows(pool: &Arc<Mutex<CircuitPool>>) -> Vec<CircuitRow>
         let (state_str, state_color) = match circuit.state {
             CircuitState::Building => ("Building", Color::Yellow),
             CircuitState::Ready => ("Ready", Color::Green),
+            CircuitState::Dirty => ("Dirty", Color::LightYellow),
             CircuitState::Closing => ("Closing", Color::Magenta),
             CircuitState::Closed => ("Closed", Color::Red),
         };

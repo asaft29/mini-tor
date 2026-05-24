@@ -16,9 +16,9 @@ use tracing::{debug, error, info, warn};
 
 const SOCKS5_READ_BUF_SIZE: usize = 4096;
 const CONNECTED_TIMEOUT: Duration = Duration::from_secs(30);
-/// Close the stream if the SOCKS5 client sends no data for 60 seconds.
+/// Close the stream if the SOCKS5 client sends no data for 120 seconds (real Tor SocksTimeout).
 /// Prevents orphaned streams from keeping circuits alive indefinitely.
-const SOCKS5_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const SOCKS5_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Bridge a SOCKS5 client connection to a destination through the onion circuit.
 pub async fn handle_stream(

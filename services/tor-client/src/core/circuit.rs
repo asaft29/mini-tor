@@ -18,13 +18,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum CircuitState {
     Building,
     Ready,
+    /// Age-expired circuit — no new streams accepted, still alive until active streams finish.
+    Dirty,
     Closing,
     Closed,
 }
@@ -391,7 +393,7 @@ impl CircuitPool {
             rebuild_failure_counts: HashMap::new(),
             abandoned_slots: HashSet::new(),
             circuit_ages: HashMap::new(),
-            max_circuit_age: Duration::from_secs(15),
+            max_circuit_age: Duration::from_secs(600), // 10 minutes (real Tor MAX_CIRCUIT_DIRTINESS)
         }
     }
 
@@ -407,8 +409,8 @@ impl CircuitPool {
         self.max_circuit_age = age;
     }
 
-    /// Move idle Ready circuits older than `max_circuit_age` to `Closing`.
-    /// Returns the circuit IDs that were expired.
+    /// Expire aged circuits: mark Ready ones as Dirty (keeping active streams alive).
+    /// The monitor picks these up and builds replacements immediately.
     pub async fn expire_aged_circuits(&mut self, now: Instant) -> Vec<CircuitId> {
         let to_expire: Vec<CircuitId> = self
             .circuit_ages
@@ -422,18 +424,18 @@ impl CircuitPool {
             })
             .collect();
 
-        let mut expired = Vec::new();
+        let mut aged_out = Vec::new();
         for id in to_expire {
             if let Some(circuit) = self.circuits.get(&id).cloned() {
                 let mut c = circuit.lock().await;
-                if c.state == CircuitState::Ready && c.active_stream_count() == 0 {
-                    c.state = CircuitState::Closed;
+                if c.state == CircuitState::Ready {
+                    c.state = CircuitState::Dirty;
                     self.circuit_ages.remove(&id);
-                    expired.push(id);
+                    aged_out.push(id);
                 }
             }
         }
-        expired
+        aged_out
     }
 
     /// Pre-build circuits to fill the pool at startup.
@@ -754,7 +756,8 @@ pub fn spawn_circuit_reader(
     })
 }
 
-/// Polls the pool every `check_interval` and rebuilds any circuit in `Closed` state.
+/// Polls the pool every `check_interval`, expires aged circuits, and rebuilds
+/// any circuit in `Closed` or `Dirty` state.
 pub fn spawn_circuit_monitor(
     pool: Arc<Mutex<CircuitPool>>,
     metrics: Arc<ClientMetrics>,
@@ -764,17 +767,62 @@ pub fn spawn_circuit_monitor(
         loop {
             tokio::time::sleep(check_interval).await;
 
-            // Expire aged circuits that are idle (Ready with no active streams).
+            // Expire aged circuits: mark as Dirty, return IDs that need replacement.
             let expired_ids: Vec<CircuitId> = {
                 let mut g = pool.lock().await;
                 g.expire_aged_circuits(Instant::now()).await
             };
-            for id in expired_ids {
+            for id in &expired_ids {
                 info!(
-                    "Circuit {} aged out ({}s), rotating",
+                    "Circuit {} aged out ({}s), building replacement",
                     id,
                     pool.lock().await.max_circuit_age.as_secs()
                 );
+            }
+
+            // Build replacement circuits alongside the Dirty ones so new streams
+            // use fresh paths. Dirty circuits stay in the pool until their streams
+            // finish (cleanup pass below removes them when idle).
+            for _ in 0..expired_ids.len() {
+                let mut g = pool.lock().await;
+                match g.build_circuit().await {
+                    Ok((new_id, read_half)) => {
+                        let circuit = g.circuits.get(&new_id).cloned();
+                        drop(g);
+                        if let Some(c) = circuit {
+                            spawn_circuit_reader(c, read_half, Arc::clone(&metrics));
+                        }
+                        info!(
+                            "Circuit monitor: replacement circuit {} built for aged slot",
+                            new_id
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "Circuit monitor: failed to build replacement circuit: {:#}",
+                            e
+                        );
+                    }
+                }
+            }
+
+            // Clean up Dirty circuits that have finished all their streams.
+            let dirty_ids: Vec<CircuitId> = {
+                let g = pool.lock().await;
+                let mut ids = Vec::new();
+                for (&id, c) in g.iter_circuits() {
+                    if c.lock().await.state == CircuitState::Dirty
+                        && c.lock().await.active_stream_count() == 0
+                    {
+                        ids.push(id);
+                    }
+                }
+                ids
+            };
+            for id in dirty_ids {
+                let mut g = pool.lock().await;
+                g.circuits.remove(&id);
+                info!("Circuit {} cleaned up (Dirty, all streams finished)", id);
             }
 
             let failed_ids: Vec<CircuitId> = {
@@ -836,10 +884,8 @@ pub fn spawn_circuit_monitor(
     })
 }
 
-/// Sends a PADDING cell to the entry node on every `Ready` circuit at random intervals.
-/// A write failure means the entry is dead; the circuit monitor will detect and rebuild.
-/// Uses the `max(X, Y)` distribution over `Uniform(1.5s, 9.5s)` to match real Tor's
-/// link padding — average interval ≈ 5.5s with natural variance.
+/// Sends a PADDING cell to the entry node on every `Ready` circuit at random
+/// intervals matching real Tor's KeepalivePeriod (240–360 seconds, 5 min avg).
 pub fn spawn_circuit_keepalive(pool: Arc<Mutex<CircuitPool>>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -867,14 +913,11 @@ pub fn spawn_circuit_keepalive(pool: Arc<Mutex<CircuitPool>>) -> tokio::task::Jo
     })
 }
 
-/// Sample a random PADDING interval using the `max(X, Y)` distribution over
-/// `Uniform(1.5s, 9.5s)`. This creates a slight bias toward longer intervals,
-/// matching real Tor's link padding behavior. Average ≈ 5.5s.
+/// Sample a random PADDING interval using `Uniform(240s, 360s)`.
+/// Average ≈ 300s — matches real Tor's KeepalivePeriod (5 minutes).
 fn random_padding_interval() -> Duration {
     let mut rng = rand::rng();
-    let a: f64 = rng.random_range(1.5..9.5);
-    let b: f64 = rng.random_range(1.5..9.5);
-    Duration::from_secs_f64(a.max(b))
+    Duration::from_secs(rng.random_range(240..360))
 }
 
 #[cfg(test)]
@@ -1107,7 +1150,7 @@ mod tests {
         assert_eq!(expired, vec![circuit_id]);
 
         let c = pool.circuits.get(&circuit_id).unwrap().lock().await;
-        assert_eq!(c.state, CircuitState::Closed);
+        assert_eq!(c.state, CircuitState::Dirty);
     }
 
     #[tokio::test]
@@ -1136,7 +1179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_expiry_skips_busy_circuits() {
+    async fn test_expiry_marks_busy_circuits_dirty() {
         let mut pool = CircuitPool::new(
             make_test_directory(),
             make_test_transport(),
@@ -1156,10 +1199,12 @@ mod tests {
         pool.circuit_ages
             .insert(99, Instant::now() - Duration::from_secs(1));
 
+        // Busy circuit IS expired (marked Dirty), but active stream stays alive.
         let expired = pool.expire_aged_circuits(Instant::now()).await;
-        assert!(expired.is_empty());
+        assert_eq!(expired, vec![99]);
 
         let c = pool.circuits.get(&99).unwrap().lock().await;
-        assert_eq!(c.state, CircuitState::Ready);
+        assert_eq!(c.state, CircuitState::Dirty);
+        assert_eq!(c.active_stream_count(), 1); // stream still registered
     }
 }

@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     spawn_circuit_monitor(
         Arc::clone(&pool),
         Arc::clone(&metrics),
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
     );
     spawn_circuit_keepalive(Arc::clone(&pool));
 

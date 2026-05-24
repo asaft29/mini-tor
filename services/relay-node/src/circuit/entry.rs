@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 /// How long a relay waits for CREATED from the next hop before giving up.
-const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(50);
 
 /// Entry node circuit handler — first hop, knows the client but NOT the destination.
 pub struct EntryCircuitHandler {

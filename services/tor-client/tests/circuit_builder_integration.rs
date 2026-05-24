@@ -488,5 +488,5 @@ async fn test_circuit_age_expiry_rebuilds_functional_circuit() {
     assert_eq!(g.circuit_count(), 1);
 
     let arc = g.get_circuit(original_id).unwrap();
-    assert_eq!(arc.lock().await.state, CircuitState::Closed);
+    assert_eq!(arc.lock().await.state, CircuitState::Dirty);
 }
