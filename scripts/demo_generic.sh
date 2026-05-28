@@ -327,7 +327,6 @@ start_relay() {
         --port "$port" \
         --host 127.0.0.1 \
         --directory-url "http://127.0.0.1:$DISCOVERY_PORT" \
-        --heartbeat-interval 30 \
         > "$LOG_DIR/relay-${label}.log" 2>&1 &
     PIDS+=($!)
 

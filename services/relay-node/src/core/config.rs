@@ -22,7 +22,7 @@ pub struct RelayConfig {
     #[arg(long, default_value = "1048576")]
     pub bandwidth: u64,
 
-    #[arg(long, default_value = "1800")]
+    #[arg(long, default_value = "60")]
     pub heartbeat_interval: u64,
 
     #[arg(long, default_value = "false")]

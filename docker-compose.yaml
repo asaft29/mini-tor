@@ -63,7 +63,7 @@ services:
       - "--directory-url"
       - "http://172.30.0.10:8080"
       - "--heartbeat-interval"
-      - "30"
+      - "60"
     depends_on:
       discovery:
         condition: service_healthy
@@ -92,7 +92,7 @@ services:
       - "--directory-url"
       - "http://172.30.0.10:8080"
       - "--heartbeat-interval"
-      - "30"
+      - "60"
     depends_on:
       discovery:
         condition: service_healthy
@@ -121,7 +121,7 @@ services:
       - "--directory-url"
       - "http://172.30.0.10:8080"
       - "--heartbeat-interval"
-      - "30"
+      - "60"
       - "--exit-allow-all"
     depends_on:
       discovery:

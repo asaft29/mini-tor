@@ -211,6 +211,23 @@ async fn unregister_from_directory(
     Ok(())
 }
 
+async fn build_metrics(
+    metrics: &Arc<RelayMetrics>,
+    circuit_registry: &Arc<Mutex<CircuitRegistry>>,
+) -> NodeMetrics {
+    NodeMetrics {
+        connections_accepted: metrics.get_connections(),
+        circuits_active: circuit_registry.lock().await.circuit_count() as u64,
+        circuits_created: metrics.get_circuits_created(),
+        circuits_destroyed: metrics.get_circuits_destroyed(),
+        bytes_forwarded: metrics.get_bytes_forwarded(),
+        bytes_received: metrics.get_bytes_received(),
+        streams_opened: metrics.get_streams_opened(),
+        uptime_secs: metrics.uptime().as_secs(),
+        event_snapshot: metrics.event_snapshot(),
+    }
+}
+
 async fn heartbeat_loop(
     channel: tonic::transport::Channel,
     node_id: String,
@@ -224,16 +241,7 @@ async fn heartbeat_loop(
     loop {
         ticker.tick().await;
 
-        let body = NodeMetrics {
-            connections_accepted: metrics.get_connections(),
-            circuits_active: circuit_registry.lock().await.circuit_count() as u64,
-            circuits_created: metrics.get_circuits_created(),
-            circuits_destroyed: metrics.get_circuits_destroyed(),
-            bytes_forwarded: metrics.get_bytes_forwarded(),
-            bytes_received: metrics.get_bytes_received(),
-            streams_opened: metrics.get_streams_opened(),
-            uptime_secs: metrics.uptime().as_secs(),
-        };
+        let body = build_metrics(&metrics, &circuit_registry).await;
 
         let request = tonic::Request::new(HeartbeatRequest {
             node_id: node_id.clone(),

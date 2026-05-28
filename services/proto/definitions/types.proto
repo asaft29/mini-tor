@@ -40,6 +40,7 @@ message NodeMetrics {
   uint64 bytes_received = 6;
   uint64 streams_opened = 7;
   uint64 uptime_secs = 8;
+  repeated string event_snapshot = 9;
 }
 
 message RegistryStats {

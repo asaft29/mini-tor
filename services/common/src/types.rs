@@ -184,6 +184,7 @@ pub struct NodeMetrics {
     pub bytes_received: u64,
     pub streams_opened: u64,
     pub uptime_secs: u64,
+    pub event_snapshot: Vec<String>,
 }
 
 impl NodeDescriptor {

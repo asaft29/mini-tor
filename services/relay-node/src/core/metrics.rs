@@ -1,6 +1,6 @@
 //! Relay node TUI metrics — event types and counters.
 
-use common::metrics::{Direction, EventBuffer};
+use common::metrics::{Direction, EventBuffer, format_bytes, format_timestamp};
 use common::protocol::{CircuitId, MessageCommand, StreamId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -112,6 +112,89 @@ impl RelayMetrics {
 
     pub fn get_streams_opened(&self) -> u64 {
         self.streams_opened.load(Ordering::Relaxed)
+    }
+
+    /// Format recent events for the heartbeat payload.
+    pub fn event_snapshot(&self) -> Vec<String> {
+        self.events
+            .snapshot(|e| {
+                let ts = format_timestamp(e.elapsed);
+                format!("[{ts}] {}", format_event_string(&e.kind))
+            })
+            .into_iter()
+            .rev()
+            .take(20)
+            .collect()
+    }
+}
+
+/// Plain-text relay event formatter for heartbeat / web UI display.
+/// Matches the TUI event format: `[timestamp] ICON LABEL    detail`
+pub fn format_event_string(kind: &EventKind) -> String {
+    match kind {
+        EventKind::ConnectionAccepted { peer } => {
+            format!("\u{2190} ACCEPT    from {peer}")
+        }
+        EventKind::ConnectionClosed { peer } => {
+            format!("\u{2014} CLOSED    conn from {peer}")
+        }
+        EventKind::CircuitCreated { circuit_id } => {
+            format!("\u{2699} CREATE    cid={circuit_id}")
+        }
+        EventKind::CircuitExtended {
+            circuit_id,
+            next_hop,
+        } => {
+            format!("\u{2192} EXTEND    cid={circuit_id} \u{2192} {next_hop}")
+        }
+        EventKind::CircuitDestroyed { circuit_id } => {
+            format!("\u{2717} DESTROY   cid={circuit_id}")
+        }
+        EventKind::RelayForward {
+            circuit_id,
+            command,
+            bytes,
+        } => {
+            format!(
+                "\u{2192} RELAY\u{2192}   cid={circuit_id} {command} [{}]",
+                format_bytes(*bytes as u64)
+            )
+        }
+        EventKind::RelayBackward {
+            circuit_id,
+            command,
+            bytes,
+        } => {
+            format!(
+                "\u{2190} RELAY\u{2190}   cid={circuit_id} {command} [{}]",
+                format_bytes(*bytes as u64)
+            )
+        }
+        EventKind::StreamOpened {
+            circuit_id,
+            stream_id,
+            destination,
+        } => {
+            format!("\u{2192} STREAM    cid={circuit_id} sid={stream_id} \u{2192} {destination}")
+        }
+        EventKind::StreamClosed {
+            circuit_id,
+            stream_id,
+        } => {
+            format!("\u{2014} END       cid={circuit_id} sid={stream_id}")
+        }
+        EventKind::StreamData {
+            circuit_id,
+            stream_id,
+            bytes,
+            direction: _,
+        } => {
+            let b = format_bytes(*bytes as u64);
+            format!("\u{2194} DATA      cid={circuit_id} sid={stream_id} [{b}]")
+        }
+        EventKind::Error { message } => {
+            format!("\u{2717} ERROR     {message}")
+        }
     }
 }
 

@@ -190,6 +190,7 @@ impl From<common::NodeMetrics> for types::NodeMetrics {
             bytes_received: m.bytes_received,
             streams_opened: m.streams_opened,
             uptime_secs: m.uptime_secs,
+            event_snapshot: m.event_snapshot.clone(),
         }
     }
 }
@@ -205,6 +206,7 @@ impl From<&types::NodeMetrics> for common::NodeMetrics {
             bytes_received: m.bytes_received,
             streams_opened: m.streams_opened,
             uptime_secs: m.uptime_secs,
+            event_snapshot: m.event_snapshot.clone(),
         }
     }
 }
