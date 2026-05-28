@@ -13,42 +13,6 @@ use std::time::{Duration, Instant};
 pub struct AppState {
     pub registry: Arc<dyn NodeStore>,
     pub metrics: Option<Arc<DiscoveryMetrics>>,
-    /// Throttles `GetRandomPath` to prevent network enumeration.
-    /// Shared across all gRPC handlers to limit path requests.
-    pub path_rate_limiter: Arc<tokio::sync::Mutex<RateLimiter>>,
-}
-
-/// Simple token-bucket rate limiter for gRPC RPCs.
-pub struct RateLimiter {
-    last_request: Option<std::time::Instant>,
-    min_interval: std::time::Duration,
-}
-
-impl RateLimiter {
-    pub fn new(min_interval: std::time::Duration) -> Self {
-        Self {
-            last_request: None,
-            min_interval,
-        }
-    }
-
-    /// Returns `true` if the request is allowed, updating the last request time.
-    #[allow(clippy::result_large_err)]
-    pub fn check(&mut self) -> Result<(), tonic::Status> {
-        let now = std::time::Instant::now();
-        if let Some(last) = self.last_request
-            && now.duration_since(last) < self.min_interval
-        {
-            let wait_ms = self.min_interval.as_millis() as u64;
-            Err(tonic::Status::resource_exhausted(format!(
-                "Too many path requests. Rate limit: 1 per {}ms",
-                wait_ms
-            )))
-        } else {
-            self.last_request = Some(now);
-            Ok(())
-        }
-    }
 }
 
 /// Entry in the node registry.

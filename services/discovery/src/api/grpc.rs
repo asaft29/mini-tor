@@ -167,8 +167,6 @@ impl Discovery for DiscoveryServiceImpl {
         &self,
         request: Request<GetRandomPathRequest>,
     ) -> Result<Response<GetRandomPathResponse>, Status> {
-        self.state.path_rate_limiter.lock().await.check()?;
-
         let req = request.into_inner();
         let count = (req.count as usize).max(3);
 

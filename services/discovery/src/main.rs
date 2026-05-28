@@ -3,7 +3,7 @@ use discovery::api::grpc::DiscoveryServiceImpl;
 use discovery::api::rest;
 use discovery::core::config::DiscoveryConfig;
 use discovery::core::metrics::{DiscoveryMetrics, EventKind};
-use discovery::core::registry::{AppState, NodeRegistry, RateLimiter};
+use discovery::core::registry::{AppState, NodeRegistry};
 use discovery::core::store::{NodeRegistryStore, NodeStore};
 use proto::services::discovery_server::DiscoveryServer;
 use std::{sync::Arc, time::Duration};
@@ -40,9 +40,6 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         registry: store.clone(),
         metrics: metrics.clone(),
-        path_rate_limiter: Arc::new(tokio::sync::Mutex::new(RateLimiter::new(
-            std::time::Duration::from_millis(500),
-        ))),
     };
 
     spawn_background_tasks(store.clone(), config.stale_timeout_secs, metrics.clone());
