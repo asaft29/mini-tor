@@ -1,3 +1,4 @@
+
 # ── Tor Onion Routing Project — Makefile ──
 # Usage:
 #   make build                     Compile all services (release)
@@ -20,8 +21,8 @@
 
 # ── Default ports ────────────────────────────────────────────────────────────
 
-DISCOVERY_PORT ?= 8080
-DISCOVERY_URL  ?= http://localhost:8080
+DISCOVERY_PORT ?= 8081
+DISCOVERY_URL  ?= http://localhost:8081
 
 ENTRY_PORT     ?= 9001
 MIDDLE_PORT    ?= 9101

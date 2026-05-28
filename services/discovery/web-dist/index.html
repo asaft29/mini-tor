@@ -6,8 +6,8 @@
     <title>Tor Discovery Service</title>
     
 <script type="module">
-import init, * as bindings from '/web-ui-c4e2e5e72cedcd4c.js';
-const wasm = await init({ module_or_path: '/web-ui-c4e2e5e72cedcd4c_bg.wasm' });
+import init, * as bindings from '/web-ui-1e94063d06a23959.js';
+const wasm = await init({ module_or_path: '/web-ui-1e94063d06a23959_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -324,7 +324,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         }
 
         .log-detail {
-            color: var(--text-dim);
+            color: #e0e0e0;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -347,15 +347,33 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         .ev-health    { color: var(--blue); }
         .ev-error     { color: var(--red); }
 
-        /* ── Relay events ──────────────────────────────── */
+        /* ── Relay events (TUI colours) ─────────────────── */
 
-        .relay-event {
+        .rel-time {
             font-size: 11px;
-            color: var(--text);
+            color: var(--text-dim);
+            flex-shrink: 0;
+        }
+
+        .rel-detail {
+            font-size: 11px;
+            color: #ffffff;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+
+        .rel-accept  { color: var(--blue);   font-weight: 700; font-size: 11px; }
+        .rel-create  { color: var(--cyan);   font-weight: 700; font-size: 11px; }
+        .rel-extend  { color: var(--green);  font-weight: 700; font-size: 11px; }
+        .rel-stream  { color: var(--yellow); font-weight: 700; font-size: 11px; }
+        .rel-data    { color: #87d7ff; font-weight: 700; font-size: 11px; }
+        .rel-fwd     { color: #b8b8b8; font-weight: 700; font-size: 11px; }
+        .rel-bwd     { color: #9a9a9a; font-weight: 700; font-size: 11px; }
+        .rel-end     { color: var(--text-dim);                font-size: 11px; }
+        .rel-destroy { color: var(--red);    font-weight: 700; font-size: 11px; }
+        .rel-error   { color: var(--red);    font-weight: 700; font-size: 11px; }
+        .rel-default { color: var(--text);                     font-size: 11px; }
 
         /* ── Pixelated scrollbar ──────────────────────── */
 
@@ -377,26 +395,19 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         .status-bar {
             display: flex;
             align-items: center;
-            gap: 14px;
-            padding: 3px 10px;
+            justify-content: center;
+            padding: 4px 10px;
             background: var(--surface);
             border: 1px solid var(--border);
             margin-top: 6px;
-            font-size: 10px;
-            color: var(--text-dim);
+            font-size: 12px;
         }
-
-        .status-item {
-            white-space: nowrap;
-        }
-
-        .status-spacer { flex: 1; }
 
         .countdown-bar {
             color: var(--green);
             letter-spacing: 0px;
         }
     </style>
-<link rel="modulepreload" href="/web-ui-c4e2e5e72cedcd4c.js" crossorigin="anonymous" integrity="sha384-WPPlgc/JB5pQcXzpH5GzTEBMXm4HS6HpNQyJGm12IaRjanygpQWFmsqyE/4lDNex"><link rel="preload" href="/web-ui-c4e2e5e72cedcd4c_bg.wasm" crossorigin="anonymous" integrity="sha384-XCzF9LnmJnXVWwz0haGvTNCqiWMziqxMJBWkNbH3idOMJnSUt/xW4zXE3ZnLMlvx" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/web-ui-1e94063d06a23959.js" crossorigin="anonymous" integrity="sha384-lFEYLLfW0bjR5VqnSeoETVHTGTwDWpgvhMDsRSh7dTC+pz/B+V+KZXjarZaWAd/B"><link rel="preload" href="/web-ui-1e94063d06a23959_bg.wasm" crossorigin="anonymous" integrity="sha384-vzRlsdTxSieSrhCk6ri0kQn6C2Y+qmycwWYZRlvwGgrs+7IHQNO+hr+8BdPxCTvW" as="fetch" type="application/wasm"></head>
 <body></body>
 </html>

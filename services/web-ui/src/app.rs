@@ -177,6 +177,43 @@ fn EventRow(entry: EventEntry) -> impl IntoView {
     }
 }
 
+fn relay_event_color(ev: &str) -> &'static str {
+    if ev.contains("\u{2190} ACCEPT")      { "rel-accept" }
+    else if ev.contains("\u{2699} CREATE") { "rel-create" }
+    else if ev.contains("\u{2192} EXTEND") { "rel-extend" }
+    else if ev.contains("\u{2717} DESTROY"){ "rel-destroy" }
+    else if ev.contains("\u{2717} ERROR")  { "rel-error" }
+    else if ev.contains("\u{2192} STREAM") { "rel-stream" }
+    else if ev.contains("\u{2014} END")    { "rel-end" }
+    else if ev.contains("\u{2014} CLOSED") { "rel-end" }
+    else if ev.contains("\u{2194} DATA")   { "rel-data" }
+    else if ev.contains("\u{2192} RELAY\u{2192}") { "rel-fwd" }
+    else if ev.contains("\u{2190} RELAY\u{2190}") { "rel-bwd" }
+    else { "rel-default" }
+}
+
+/// Split a relay event into (timestamp, label, detail).
+/// Events are formatted as: "[+0:00:05] ICON LABEL    detail text here"
+fn split_relay_event(ev: &str) -> (String, String, String) {
+    // Split timestamp (before first "] ")
+    let (ts, rest) = if let Some(pos) = ev.find("] ") {
+        let ts = &ev[..=pos];   // "[+0:00:05]"
+        let rest = ev[pos + 2..].trim_start(); // "ICON LABEL    detail..."
+        (ts, rest)
+    } else {
+        return (String::new(), ev.to_string(), String::new());
+    };
+
+    // Split label from detail at the gap
+    if let Some(pos) = rest.find("    ") {
+        let label = rest[..pos].to_string();
+        let detail = rest[pos..].trim_start().to_string();
+        (ts.to_string(), label, detail)
+    } else {
+        (ts.to_string(), rest.to_string(), String::new())
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let data: RwSignal<Option<DashboardData>> = RwSignal::new(None);
@@ -216,7 +253,7 @@ pub fn App() -> impl IntoView {
                 all_events.set(events);
                 data.set(Some(d));
             }
-            for i in (1..=3).rev() {
+            for i in (1..=10).rev() {
                 countdown.set(i);
                 gloo_timers::future::sleep(std::time::Duration::from_millis(1000)).await;
             }
@@ -237,19 +274,12 @@ pub fn App() -> impl IntoView {
             <header class="header">
                 <h1>"$ discovery --dashboard"<span class="cursor">"_"</span></h1>
                 {move || data.get().map(|d| {
-                    let ready_class = if d.ready { "badge badge-ready" } else { "badge badge-not-ready" };
-                    let ready_text = if d.ready { "● READY" } else { "✗ NOT READY" };
                     let uptime = format_uptime(d.metrics.uptime_secs);
                     view! {
                         <div class="header-stats">
-                            <span class=ready_class>{ready_text}</span>
                             <span class="stat">"Up: " <strong>{uptime}</strong></span>
                             <span class="stat">"Nodes: " <strong>{d.stats.total_nodes}</strong> " (E:" <strong>{d.stats.entry_count}</strong> " M:" <strong>{d.stats.middle_count}</strong> " X:" <strong>{d.stats.exit_count}</strong> ")"</span>
-                            <span class="stat">"Regs: " <strong>{d.metrics.registrations}</strong></span>
-                            <span class="stat">"Removed: " <strong>{d.metrics.removals}</strong></span>
-                            <span class="stat">"HBs: " <strong>{d.metrics.heartbeats}</strong></span>
                             <span class="stat">"Paths: " <strong>{d.metrics.path_requests}</strong></span>
-                            <span class="stat">"Cleaned: " <strong>{d.metrics.stale_cleaned}</strong></span>
                         </div>
                     }
                 })}
@@ -297,7 +327,7 @@ pub fn App() -> impl IntoView {
                                     } else {
                                         nodes.into_iter().map(move |n| {
                                             let sel = selected_id;
-                                            view! { <NodeRow node=n selected_id=sel.read_only() on_select=Callback::new(move |id| selected_id.set(Some(id))) max_bw=max_bw/> }
+                                            view! { <NodeRow node=n selected_id=sel.read_only() on_select=Callback::new(move |id: String| { if selected_id.get() == Some(id.clone()) { selected_id.set(None) } else { selected_id.set(Some(id)) }}) max_bw=max_bw/> }
                                         }).collect_view().into_any()
                                     }
                                 }
@@ -342,8 +372,16 @@ pub fn App() -> impl IntoView {
                                     {if relay_events.is_empty() {
                                         view! { <div class="log-empty-msg">"Waiting for relay events..."</div> }.into_any()
                                     } else {
-                                        relay_events.into_iter().rev().take(30).map(|ev| {
-                                            view! { <div class="log-row"><span class="relay-event">{ev}</span></div> }
+                                        relay_events.into_iter().rev().take(200).map(|ev| {
+                                            let color = relay_event_color(&ev);
+                                            let (ts, label, detail) = split_relay_event(&ev);
+                                            view! {
+                                                <div class="log-row">
+                                                    <span class="rel-time">{ts}" "</span>
+                                                    <span class=color.to_string()>{label}"    "</span>
+                                                    <span class="rel-detail">{detail}</span>
+                                                </div>
+                                            }
                                         }).collect_view().into_any()
                                     }}
                                 </div>
@@ -372,16 +410,11 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="status-bar">
-                <span class="status-item">"[↑↓] Navigate"</span>
-                <span class="status-item">"[Enter] Details"</span>
-                <span class="status-item">"[Tab] Switch"</span>
-                <span class="status-item">"[R] Refresh"</span>
-                <span class="status-spacer"></span>
                 {move || {
                     let c = countdown.get();
-                    let bar = "\u{258c}".repeat(c as usize);
-                    let slash = "/".repeat(3usize.saturating_sub(c as usize));
-                    view! { <span class="status-item">"Next refresh in " {c} "s" <span class="countdown-bar">{slash}{bar}</span></span> }
+                    let filled = "\u{2588}".repeat(c as usize);
+                    let empty = "\u{2591}".repeat(10usize.saturating_sub(c as usize));
+                    view! { <span class="countdown-bar">{filled}{empty}</span> }
                 }}
             </div>
         </div>

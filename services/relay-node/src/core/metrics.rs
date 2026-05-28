@@ -156,7 +156,7 @@ pub fn format_event_string(kind: &EventKind) -> String {
             bytes,
         } => {
             format!(
-                "\u{2192} RELAY\u{2192}   cid={circuit_id} {command} [{}]",
+                "\u{2192} RELAY\u{2192}    cid={circuit_id} {command} [{}]",
                 format_bytes(*bytes as u64)
             )
         }
@@ -166,7 +166,7 @@ pub fn format_event_string(kind: &EventKind) -> String {
             bytes,
         } => {
             format!(
-                "\u{2190} RELAY\u{2190}   cid={circuit_id} {command} [{}]",
+                "\u{2190} RELAY\u{2190}    cid={circuit_id} {command} [{}]",
                 format_bytes(*bytes as u64)
             )
         }
