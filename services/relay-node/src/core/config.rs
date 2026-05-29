@@ -16,6 +16,10 @@ pub struct RelayConfig {
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
 
+    /// IP address the TCP listener binds to. Defaults to 0.0.0.0 in Docker.
+    #[arg(long, default_value = "0.0.0.0")]
+    pub bind_host: String,
+
     #[arg(long, default_value = "http://localhost:8080")]
     pub directory_url: String,
 
@@ -40,6 +44,14 @@ pub struct RelayConfig {
 impl RelayConfig {
     pub fn bind_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
         let ip: IpAddr = self.host.parse()?;
+        Ok(SocketAddr::new(ip, self.port))
+    }
+
+    /// Address the TCP listener binds to. Separate from `bind_addr` so
+    /// the relay can register with a public IP while binding to 0.0.0.0
+    /// inside Docker (where the public IP lives on the host interface).
+    pub fn listener_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
+        let ip: IpAddr = self.bind_host.parse()?;
         Ok(SocketAddr::new(ip, self.port))
     }
 
@@ -107,6 +119,7 @@ mod tests {
             heartbeat_interval: 60,
             exit_allow_all: false,
             tui: false,
+            bind_host: "0.0.0.0".to_string(),
             operator_id: None,
         };
 
@@ -131,6 +144,7 @@ mod tests {
             heartbeat_interval: 60,
             exit_allow_all: false,
             tui: false,
+            bind_host: "0.0.0.0".to_string(),
             operator_id: None,
         };
 
@@ -151,6 +165,7 @@ mod tests {
             heartbeat_interval: 60,
             exit_allow_all: false,
             tui: false,
+            bind_host: "0.0.0.0".to_string(),
             operator_id: None,
         };
 

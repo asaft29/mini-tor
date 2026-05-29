@@ -242,6 +242,7 @@ impl WizardState {
             heartbeat_interval,
             exit_allow_all: self.exit_allow_all,
             tui: true,
+            bind_host: "0.0.0.0".to_string(),
             operator_id: if self.operator_id.is_empty() {
                 None
             } else {
@@ -429,13 +430,16 @@ fn render(frame: &mut Frame, state: &WizardState) {
     frame.render_widget(fields_widget, fields_area);
 
     let status_text = match &state.error {
-        Some(err) => Line::from(vec![
-            Span::styled(
-                "\u{2717} ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(err.clone(), Style::default().fg(Color::Red)),
-        ]),
+        Some(err) => {
+            let msg: String = err.clone();
+            Line::from(vec![
+                Span::styled(
+                    "\u{2717} ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(msg, Style::default().fg(Color::Red)),
+            ])
+        }
         None => Line::from(vec![
             Span::styled(
                 "\u{2713} ",
@@ -470,6 +474,7 @@ mod tests {
             heartbeat_interval: 60,
             exit_allow_all: false,
             tui: true,
+            bind_host: "0.0.0.0".to_string(),
             operator_id: None,
         }
     }

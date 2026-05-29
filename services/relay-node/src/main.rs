@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
     );
 
     let bind_addr = config.bind_addr()?;
+    let listener_addr = config.listener_addr()?;
 
     let node_id = Uuid::new_v4().to_string();
     info!("  Node ID: {}", node_id);
@@ -99,8 +100,8 @@ async fn main() -> Result<()> {
     let circuit_registry = Arc::new(Mutex::new(CircuitRegistry::new()));
     let relay_metrics = RelayMetrics::new();
 
-    let listener = TcpListener::bind(bind_addr).await?;
-    info!("Listening on {}", bind_addr);
+    let listener = TcpListener::bind(listener_addr).await?;
+    info!("Listening on {}", listener_addr);
 
     let heartbeat_handle = tokio::spawn(heartbeat_loop(
         channel.clone(),
