@@ -1,0 +1,298 @@
+# docker-compose.do.yaml — DigitalOcean deployment
+#
+# Launches 1 discovery service + 9 relay nodes on a single droplet.
+# The tor-client runs locally on your machine, not on the droplet.
+#
+# Usage:
+#   PUBLIC_IP=<droplet-ip> docker compose -f docker-compose.do.yaml up -d --build
+#   docker compose -f docker-compose.do.yaml logs -f
+#   docker compose -f docker-compose.do.yaml down
+#
+# Verify:
+#   curl http://<droplet-ip>:8081                    # web UI
+#   grpcurl -plaintext <droplet-ip>:8080 list        # gRPC services
+
+services:
+  # ---- Discovery Service ----
+  discovery:
+    build:
+      context: .
+      dockerfile: services/discovery/Dockerfile
+    container_name: tor-discovery
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--web-port"
+      - "8081"
+      - "--allow-same-ip"
+      - "--stale-timeout-secs"
+      - "120"
+    environment:
+      - RUST_LOG=discovery=info
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  # ---- Entry Relays (x3) ----
+  relay-entry-1:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-entry-1
+    ports:
+      - "9001:9001"
+    command:
+      - "--node-type"
+      - "entry"
+      - "--port"
+      - "9001"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  relay-entry-2:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-entry-2
+    ports:
+      - "9002:9002"
+    command:
+      - "--node-type"
+      - "entry"
+      - "--port"
+      - "9002"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  relay-entry-3:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-entry-3
+    ports:
+      - "9003:9003"
+    command:
+      - "--node-type"
+      - "entry"
+      - "--port"
+      - "9003"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  # ---- Middle Relays (x3) ----
+  relay-middle-1:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-middle-1
+    ports:
+      - "9101:9101"
+    command:
+      - "--node-type"
+      - "middle"
+      - "--port"
+      - "9101"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  relay-middle-2:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-middle-2
+    ports:
+      - "9102:9102"
+    command:
+      - "--node-type"
+      - "middle"
+      - "--port"
+      - "9102"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  relay-middle-3:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-middle-3
+    ports:
+      - "9103:9103"
+    command:
+      - "--node-type"
+      - "middle"
+      - "--port"
+      - "9103"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  # ---- Exit Relays (x3) ----
+  relay-exit-1:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-exit-1
+    ports:
+      - "9201:9201"
+    command:
+      - "--node-type"
+      - "exit"
+      - "--port"
+      - "9201"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+      - "--exit-allow-all"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  relay-exit-2:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-exit-2
+    ports:
+      - "9202:9202"
+    command:
+      - "--node-type"
+      - "exit"
+      - "--port"
+      - "9202"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+      - "--exit-allow-all"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+  relay-exit-3:
+    build:
+      context: .
+      dockerfile: services/relay-node/Dockerfile
+    container_name: tor-relay-exit-3
+    ports:
+      - "9203:9203"
+    command:
+      - "--node-type"
+      - "exit"
+      - "--port"
+      - "9203"
+      - "--host"
+      - "${PUBLIC_IP}"
+      - "--directory-url"
+      - "http://discovery:8080"
+      - "--heartbeat-interval"
+      - "60"
+      - "--exit-allow-all"
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      discovery:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tor-network
+
+networks:
+  tor-network:
+    driver: bridge
