@@ -66,7 +66,7 @@ pub struct DashboardData {
 enum TabKind { All, Entry, Middle, Exit }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum SortCol { Id, Type, Addr, Bw }
+enum SortCol { Id, Type, Addr }
 
 async fn fetch_dashboard() -> Option<DashboardData> {
     let resp = Request::get("/api/dashboard").send().await.ok()?;
@@ -108,14 +108,6 @@ fn format_elapsed(secs: f64) -> String {
     format!("+{h}:{m:02}:{s:02}")
 }
 
-fn bw_bar(bps: u64, max_bps: u64) -> String {
-    if max_bps == 0 { return String::new(); }
-    let ratio = (bps as f64 / max_bps as f64).clamp(0.0, 1.0);
-    let filled = (ratio * 10.0) as usize;
-    let empty = 10usize.saturating_sub(filled);
-    format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty))
-}
-
 fn filter_nodes(nodes: &[NodeInfo], tab: TabKind) -> Vec<NodeInfo> {
     nodes.iter()
         .filter(|n| match tab {
@@ -133,16 +125,13 @@ fn sort_nodes(nodes: &mut [NodeInfo], col: SortCol, asc: bool) {
         SortCol::Id => nodes.sort_by(|a, b| if asc { a.node_id.cmp(&b.node_id) } else { b.node_id.cmp(&a.node_id) }),
         SortCol::Type => nodes.sort_by(|a, b| if asc { a.node_type.cmp(&b.node_type) } else { b.node_type.cmp(&a.node_type) }),
         SortCol::Addr => nodes.sort_by(|a, b| if asc { a.address.cmp(&b.address) } else { b.address.cmp(&a.address) }),
-        SortCol::Bw => nodes.sort_by(|a, b| if asc { a.bandwidth.cmp(&b.bandwidth) } else { b.bandwidth.cmp(&a.bandwidth) }),
     }
 }
 
 #[component]
-fn NodeRow(node: NodeInfo, selected_id: ReadSignal<Option<String>>, on_select: Callback<String>, max_bw: u64) -> impl IntoView {
+fn NodeRow(node: NodeInfo, selected_id: ReadSignal<Option<String>>, on_select: Callback<String>) -> impl IntoView {
     let nid = node.node_id.clone();
     let short_id: String = nid.chars().take(12).collect();
-    let bw = format_bandwidth(node.bandwidth);
-    let bar = bw_bar(node.bandwidth, max_bw);
     let type_class = format!("type-badge type-{}", match node.node_type.as_str() {
         "Entry" => "entry", "Middle" => "middle", "Exit" => "exit", _ => ""
     });
@@ -155,10 +144,6 @@ fn NodeRow(node: NodeInfo, selected_id: ReadSignal<Option<String>>, on_select: C
             <td class="mono" title=node.node_id.clone()>{short_id}"..."</td>
             <td><span class=type_class>{node.node_type.clone()}</span></td>
             <td class="mono">{node.address.clone()}</td>
-            <td class="right mono">
-                <span class="bw-bar">{bar}</span>
-                " " {bw}
-            </td>
         </tr>
     }
 }
@@ -223,7 +208,7 @@ pub fn App() -> impl IntoView {
     let selected_id: RwSignal<Option<String>> = RwSignal::new(None);
     let all_events: RwSignal<Vec<EventEntry>> = RwSignal::new(Vec::new());
     let latest_elapsed: RwSignal<f64> = RwSignal::new(0.0);
-    let countdown: RwSignal<u8> = RwSignal::new(3);
+    let countdown: RwSignal<u8> = RwSignal::new(20);
 
     spawn_local(async move {
         loop {
@@ -249,11 +234,11 @@ pub fn App() -> impl IntoView {
                 }
                 latest_elapsed.set(new_threshold);
 
-                events.truncate(20);
+                events.truncate(200);
                 all_events.set(events);
                 data.set(Some(d));
             }
-            for i in (1..=10).rev() {
+            for i in (1..=20).rev() {
                 countdown.set(i);
                 gloo_timers::future::sleep(std::time::Duration::from_millis(1000)).await;
             }
@@ -309,9 +294,6 @@ pub fn App() -> impl IntoView {
                             <th style="cursor:pointer" on:click=move |_| on_sort(SortCol::Addr)>
                                 "Addr" {move || if sort_col.get() == SortCol::Addr { if sort_asc.get() { " ▲" } else { " ▼" } } else { "" }}
                             </th>
-                            <th class="right" style="cursor:pointer" on:click=move |_| on_sort(SortCol::Bw)>
-                                "BW" {move || if sort_col.get() == SortCol::Bw { if sort_asc.get() { " ▲" } else { " ▼" } } else { "" }}
-                            </th>
                         </tr>
                     </thead>
                     <tbody>
@@ -320,18 +302,17 @@ pub fn App() -> impl IntoView {
                             match &d {
                                 Some(d) => {
                                     let mut nodes = filter_nodes(&d.nodes, active_tab.get());
-                                    let max_bw = nodes.iter().map(|n| n.bandwidth).max().unwrap_or(1);
                                     sort_nodes(&mut nodes, sort_col.get(), sort_asc.get());
                                     if nodes.is_empty() {
-                                        view! { <tr><td colspan="4" class="empty-cell">"No nodes matching filter"</td></tr> }.into_any()
+                                        view! { <tr><td colspan="3" class="empty-cell">"No nodes matching filter"</td></tr> }.into_any()
                                     } else {
                                         nodes.into_iter().map(move |n| {
                                             let sel = selected_id;
-                                            view! { <NodeRow node=n selected_id=sel.read_only() on_select=Callback::new(move |id: String| { if selected_id.get() == Some(id.clone()) { selected_id.set(None) } else { selected_id.set(Some(id)) }}) max_bw=max_bw/> }
+                                            view! { <NodeRow node=n selected_id=sel.read_only() on_select=Callback::new(move |id: String| { if selected_id.get() == Some(id.clone()) { selected_id.set(None) } else { selected_id.set(Some(id)) }})/> }
                                         }).collect_view().into_any()
                                     }
                                 }
-                                None => view! { <tr><td colspan="4" class="empty-cell">"Connecting to discovery service..."</td></tr> }.into_any()
+                                None => view! { <tr><td colspan="3" class="empty-cell">"Connecting to discovery service..."</td></tr> }.into_any()
                             }
                         }}
                     </tbody>
@@ -413,7 +394,7 @@ pub fn App() -> impl IntoView {
                 {move || {
                     let c = countdown.get();
                     let filled = "\u{2588}".repeat(c as usize);
-                    let empty = "\u{2591}".repeat(10usize.saturating_sub(c as usize));
+                    let empty = "\u{2591}".repeat(20usize.saturating_sub(c as usize));
                     view! { <span class="countdown-bar">{filled}{empty}</span> }
                 }}
             </div>
