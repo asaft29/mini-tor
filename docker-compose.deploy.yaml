@@ -23,6 +23,7 @@ services:
       - "8080:8080"
       - "8081:8081"
     command:
+      - "discovery"
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -53,6 +54,7 @@ services:
     ports:
       - "9001:9001"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "entry"
       - "--port"
@@ -80,6 +82,7 @@ services:
     ports:
       - "9002:9002"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "entry"
       - "--port"
@@ -107,6 +110,7 @@ services:
     ports:
       - "9003:9003"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "entry"
       - "--port"
@@ -135,6 +139,7 @@ services:
     ports:
       - "9101:9101"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "middle"
       - "--port"
@@ -162,6 +167,7 @@ services:
     ports:
       - "9102:9102"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "middle"
       - "--port"
@@ -189,6 +195,7 @@ services:
     ports:
       - "9103:9103"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "middle"
       - "--port"
@@ -217,6 +224,7 @@ services:
     ports:
       - "9201:9201"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "exit"
       - "--port"
@@ -245,6 +253,7 @@ services:
     ports:
       - "9202:9202"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "exit"
       - "--port"
@@ -273,6 +282,7 @@ services:
     ports:
       - "9203:9203"
     command:
+      - "/app/relay-node"
       - "--node-type"
       - "exit"
       - "--port"
