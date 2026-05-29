@@ -15,9 +15,7 @@
 services:
   # ---- Discovery Service ----
   discovery:
-    build:
-      context: .
-      dockerfile: services/discovery/Dockerfile
+    image: ghcr.io/asaft29/tor-discovery:latest
     container_name: tor-discovery
     ports:
       - "8080:8080"
@@ -47,9 +45,7 @@ services:
 
   # ---- Entry Relays (x3) ----
   relay-entry-1:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-entry-1
     ports:
       - "9001:9001"
@@ -76,9 +72,7 @@ services:
       - tor-network
 
   relay-entry-2:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-entry-2
     ports:
       - "9002:9002"
@@ -105,9 +99,7 @@ services:
       - tor-network
 
   relay-entry-3:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-entry-3
     ports:
       - "9003:9003"
@@ -135,9 +127,7 @@ services:
 
   # ---- Middle Relays (x3) ----
   relay-middle-1:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-middle-1
     ports:
       - "9101:9101"
@@ -164,9 +154,7 @@ services:
       - tor-network
 
   relay-middle-2:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-middle-2
     ports:
       - "9102:9102"
@@ -193,9 +181,7 @@ services:
       - tor-network
 
   relay-middle-3:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-middle-3
     ports:
       - "9103:9103"
@@ -223,9 +209,7 @@ services:
 
   # ---- Exit Relays (x3) ----
   relay-exit-1:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-exit-1
     ports:
       - "9201:9201"
@@ -253,9 +237,7 @@ services:
       - tor-network
 
   relay-exit-2:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-exit-2
     ports:
       - "9202:9202"
@@ -283,9 +265,7 @@ services:
       - tor-network
 
   relay-exit-3:
-    build:
-      context: .
-      dockerfile: services/relay-node/Dockerfile
+    image: ghcr.io/asaft29/tor-relay:latest
     container_name: tor-relay-exit-3
     ports:
       - "9203:9203"
