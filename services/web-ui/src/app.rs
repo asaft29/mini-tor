@@ -291,7 +291,7 @@ pub fn App() -> impl IntoView {
                             <th style="cursor:pointer" on:click=move |_| on_sort(SortCol::Type)>
                                 "Type" {move || if sort_col.get() == SortCol::Type { if sort_asc.get() { " ▲" } else { " ▼" } } else { "" }}
                             </th>
-                            <th style="cursor:pointer;text-align:center" on:click=move |_| on_sort(SortCol::Addr)>
+                            <th style="cursor:pointer" on:click=move |_| on_sort(SortCol::Addr)>
                                 "Addr" {move || if sort_col.get() == SortCol::Addr { if sort_asc.get() { " ▲" } else { " ▼" } } else { "" }}
                             </th>
                         </tr>
